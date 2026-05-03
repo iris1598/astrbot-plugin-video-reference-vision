@@ -2,11 +2,13 @@
   "enabled": {
     "type": "bool",
     "description": "启用插件",
+    "hint": "关闭后插件不会缓存视频、处理引用，也不会改写模型请求。",
     "default": true
   },
   "mode": {
     "type": "string",
     "description": "工作模式",
+    "hint": "`auto` 按模型能力自动判断，`force` 强制按视频模型处理，`off` 完全关闭插件逻辑。",
     "default": "auto",
     "options": [
       "auto",
@@ -17,16 +19,19 @@
   "prefer_public_url": {
     "type": "bool",
     "description": "公网链接优先直传",
+    "hint": "媒体本身就是公网链接时，优先直接传链接，不先下载再转 base64。",
     "default": true
   },
   "prefer_model_metadata_video": {
     "type": "bool",
     "description": "优先按元数据判断视频能力",
+    "hint": "优先读取模型元数据里的输入模态信息，判断当前模型是否支持视频。",
     "default": true
   },
   "fallback_behavior": {
     "type": "string",
     "description": "失败处理",
+    "hint": "`keep_text` 保留 AstrBot 默认的视频附件文本，`silent` 静默移除，不再把附件文本发给模型。",
     "default": "keep_text",
     "options": [
       "keep_text",
@@ -36,21 +41,25 @@
   "max_base64_mb": {
     "type": "int",
     "description": "base64 大小上限（MB）",
+    "hint": "本地视频或 GIF 超过这个大小时，不再转成 base64；Kimi 可按策略改走上传模式。",
     "default": 20
   },
   "qwen_fps": {
     "type": "float",
     "description": "Qwen 抽帧频率",
+    "hint": "传给 Qwen / DashScope 的视频抽帧频率，数值越高读取越细，但请求也会更重。",
     "default": 2.0
   },
   "generic_fps": {
     "type": "float",
     "description": "通用抽帧频率",
+    "hint": "传给通用 OpenAI 兼容视频接口的抽帧频率，只有支持该字段的 provider 才会使用。",
     "default": 2.0
   },
   "kimi_strategy": {
     "type": "string",
     "description": "Kimi 处理策略",
+    "hint": "`auto` 小文件走 base64、大文件可上传；`upload` 强制先上传再引用；`base64` 强制直接内联。",
     "default": "auto",
     "options": [
       "auto",
@@ -61,56 +70,67 @@
   "kimi_upload_on_oversize": {
     "type": "bool",
     "description": "超限时尝试 Kimi 上传",
+    "hint": "当媒体超过 base64 上限且当前策略允许时，自动改走 Kimi Files 上传链路。",
     "default": true
   },
   "kimi_api_base": {
     "type": "string",
     "description": "Kimi API Base",
+    "hint": "可选覆盖 Kimi 的接口地址；留空时沿用当前 provider 配置。",
     "default": ""
   },
   "max_videos_per_message": {
     "type": "int",
     "description": "单条消息缓存上限",
+    "hint": "每条原始消息最多缓存多少个视频或 GIF，超出的部分会忽略。",
     "default": 3
   },
   "max_videos_per_request": {
     "type": "int",
     "description": "单次请求注入上限",
+    "hint": "一次提问里最多向模型注入多少个被引用的视频或 GIF，避免请求过重。",
     "default": 1
   },
   "cache_ttl_seconds": {
     "type": "int",
     "description": "缓存时长（秒）",
+    "hint": "视频消息缓存的保留时间。用户后续引用时会先从 `Reply.chain`，再从这份缓存里找媒体。",
     "default": 7200
   },
   "cache_max_entries": {
     "type": "int",
     "description": "全局缓存上限",
+    "hint": "插件内存里最多保留多少条视频/GIF 缓存记录，超出后会淘汰旧记录。",
     "default": 500
   },
   "remove_default_video_text": {
     "type": "bool",
     "description": "移除默认视频提示",
+    "hint": "成功注入真实视频后，移除 AstrBot 默认的 `[Video Attachment ...]` 文本，避免重复干扰模型。",
     "default": true
   },
   "allow_direct_video": {
     "type": "bool",
     "description": "允许直发媒体注入",
+    "hint": "开启后，不引用消息时也允许直接把当前视频或 GIF 注入模型；关闭时只在引用场景下触发。",
     "default": false
   },
   "intercept_direct_video_llm_request": {
     "type": "bool",
     "description": "拦截未引用媒体请求",
+    "hint": "未引用视频/GIF 且又不允许直发注入时，拦截 AstrBot 默认的 LLM 请求，避免白跑一轮附件文本。",
     "default": true
   },
   "provider_allowlist": {
     "type": "list",
     "description": "启用关键字",
+    "hint": "只对命中这些关键字的 provider 或 model 生效。留空表示不限制。",
     "default": []
   },
   "provider_denylist": {
     "type": "list",
     "description": "禁用关键字",
+    "hint": "命中这些关键字的 provider 或 model 会被跳过，优先级高于启用关键字。",
     "default": []
   },
   "video_caption_provider_id": {
@@ -118,22 +138,24 @@
     "description": "视频转述模型",
     "default": "",
     "_special": "select_provider",
-    "hint": "留空则直接把 video_url 注入当前聊天模型"
+    "hint": "可选单独指定一个视频转述模型。留空则直接把 `video_url` 注入当前聊天模型。"
   },
   "video_caption_prompt": {
     "type": "text",
     "description": "视频转述提示词",
-    "hint": "这里写给转述模型的提示词，可直接改成你的业务文案",
+    "hint": "这里写给视频转述模型的提示词。你可以直接改成自己的业务说明、输出格式或口吻要求。",
     "default": "请阅读这个视频或 GIF，并用中文转述与用户问题直接相关的内容。如果用户没有提出具体问题，就概括主要内容、关键画面、对白或字幕，以及事件顺序。不要编造没有出现的信息。"
   },
   "video_caption_use_current_question": {
     "type": "bool",
     "description": "转述时带上当前问题",
+    "hint": "调用视频转述模型时，把用户当前这句提问一起带进去，让转述更贴近问题本身。",
     "default": true
   },
   "enable_gif_input": {
     "type": "bool",
     "description": "按完整动图处理 GIF",
+    "hint": "开启后，被引用的 GIF 会按视频输入处理，尽量读取完整动图，而不只看第一帧。",
     "default": false
   }
 }
