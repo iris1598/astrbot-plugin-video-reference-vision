@@ -142,6 +142,42 @@ async def test_direct_video_only_request_is_intercepted(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_direct_video_with_text_is_also_intercepted(tmp_path: Path):
+    video_file = tmp_path / "direct_text.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-vl-max",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "allow_direct_video": False,
+            "intercept_direct_video_llm_request": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:100",
+        message_id="msg_direct_text",
+        message_chain=[Video.fromFileSystem(str(video_file))],
+        message_str="帮我看看这是什么",
+    )
+    req = ProviderRequest(prompt="帮我看看这是什么")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert event.stopped is True
+    assert req.contexts == []
+    assert req.prompt == "帮我看看这是什么"
+
+
+@pytest.mark.asyncio
 async def test_capture_and_inject_from_reply_chain_rewrites_request(tmp_path: Path):
     video_file = tmp_path / "clip.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
@@ -356,3 +392,98 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
         and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
         for part in content
     )
+
+
+@pytest.mark.asyncio
+async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
+    local_video = tmp_path / "downloaded.mp4"
+    local_video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "api_base": "https://api.moonshot.cn/v1",
+            "model": "kimi-k2.5",
+            "key": "k_test_key",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "upload",
+            "prefer_public_url": True,
+        },
+    )
+
+    remote_video = Video(file="https://example.com/demo.mp4")
+
+    async def fake_convert_to_file_path(self):
+        del self
+        return str(local_video)
+
+    event = make_event(
+        session_id="platform:group:402",
+        message_id="query_4",
+        message_chain=[Reply(id="k3", chain=[remote_video])],
+        message_str="read this remote video",
+    )
+    req = ProviderRequest(prompt="read this remote video")
+
+    class FakeFiles:
+        async def create(self, file, purpose):
+            assert Path(file) == local_video
+            assert purpose == "video"
+            return SimpleNamespace(id="file_test_remote_upload")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, api_key, base_url):
+            self.files = FakeFiles()
+
+    with patch.object(Video, "convert_to_file_path", fake_convert_to_file_path), patch(
+        "openai.AsyncOpenAI", FakeAsyncOpenAI
+    ):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(req.contexts) == 1
+    content = req.contexts[0]["content"]
+    assert any(
+        part.get("type") == "video_url"
+        and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
+        for part in content
+    )
+
+
+def test_global_llm_metadata_is_used_for_strategy_detection():
+    provider = DummyProvider(
+        {
+            "provider": "openai_chat_completion",
+            "api_base": "https://example.com/v1",
+            "modalities": None,
+        },
+        model="custom-video-model",
+    )
+
+    with patch.dict(
+        plugin_module.LLM_METADATAS,
+        {
+            "custom-video-model": {
+                "id": "custom-video-model",
+                "reasoning": False,
+                "tool_call": False,
+                "knowledge": "none",
+                "release_date": "",
+                "modalities": {"input": ["text", "video"], "output": ["text"]},
+                "open_weights": False,
+                "limit": {"context": 0, "output": 0},
+            }
+        },
+        clear=False,
+    ):
+        strategy = plugin_module._detect_video_strategy(
+            provider,
+            mode="auto",
+            prefer_model_metadata_video=True,
+        )
+
+    assert strategy == "generic"

@@ -15,6 +15,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -89,6 +90,14 @@ def _get_provider_modalities(provider: Any) -> list[str]:
         inputs = model_metadata.get("modalities", {}).get("input", [])
         if isinstance(inputs, list):
             return [str(x).lower() for x in inputs]
+
+    model_name = str(getattr(provider, "get_model", lambda: "")() or "").strip()
+    if model_name:
+        metadata = LLM_METADATAS.get(model_name)
+        if isinstance(metadata, dict):
+            inputs = metadata.get("modalities", {}).get("input", [])
+            if isinstance(inputs, list):
+                return [str(x).lower() for x in inputs]
     return []
 
 
@@ -399,9 +408,7 @@ class Main(Star):
         has_video = any(isinstance(comp, Video) for comp in message_chain)
         if not has_video:
             return False
-
-        has_text = bool(str(getattr(event, "message_str", "") or "").strip())
-        return not has_text
+        return True
 
     def _extract_quoted_videos(
         self,
@@ -505,6 +512,21 @@ class Main(Star):
     ) -> dict | None:
         file_ref = str(video.file or "")
         prefer_public_url = bool(self.config.get("prefer_public_url", True))
+        kimi_part_mode = self._resolve_kimi_part_mode(strategy=strategy, size_bytes=None)
+
+        if strategy == "kimi" and kimi_part_mode == "upload":
+            local_path = await video.convert_to_file_path()
+            if not os.path.exists(local_path):
+                logger.warning(
+                    "video-reference-vision: local video path not found: %s",
+                    local_path,
+                )
+                return None
+            logger.info("video-reference-vision: using Kimi upload mode")
+            return await self._build_kimi_upload_video_part(
+                provider=provider,
+                local_path=local_path,
+            )
 
         local_path: str | None = None
         size_bytes: int | None = None

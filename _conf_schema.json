@@ -95,12 +95,12 @@
   },
   "allow_direct_video": {
     "type": "bool",
-    "description": "是否允许不引用消息、直接对当前视频做注入",
+    "description": "是否允许不引用消息，直接对当前视频做注入",
     "default": false
   },
   "intercept_direct_video_llm_request": {
     "type": "bool",
-    "description": "只发视频且未引用时，是否拦截 AstrBot 默认的 LLM 请求",
+    "description": "未引用视频时，是否拦截 AstrBot 默认的 LLM 请求（包括纯视频和视频加文字）",
     "default": true
   },
   "provider_allowlist": {
