@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib.util
 import sys
@@ -96,6 +96,10 @@ class DummyEvent:
 
 def make_event(**kwargs) -> DummyEvent:
     return DummyEvent(**kwargs)
+
+
+async def _assembled_content(req: ProviderRequest) -> list[dict]:
+    return (await req.assemble_context())["content"]
 
 
 def test_video_cache_put_get_and_expire():
@@ -284,12 +288,11 @@ async def test_capture_and_inject_from_reply_chain_rewrites_request(tmp_path: Pa
 
     await plugin.inject_quoted_video(event, req)
 
-    assert req.prompt is None
+    assert req.prompt == "请分析这个视频"
     assert req.image_urls == []
     assert req.audio_urls == []
-    assert req.extra_user_content_parts == []
-    assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
+    assert req.contexts == []
+    content = await _assembled_content(req)
     assert any(part.get("type") == "video_url" for part in content)
     assert not any(
         part.get("type") == "text"
@@ -325,8 +328,8 @@ async def test_inject_from_reply_id_cache_fallback(tmp_path: Path):
 
     await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    assert any(part.get("type") == "video_url" for part in req.contexts[0]["content"])
+    assert req.contexts == []
+    assert any(part.get("type") == "video_url" for part in await _assembled_content(req))
 
 
 @pytest.mark.asyncio
@@ -350,8 +353,8 @@ async def test_reply_chain_video_with_invalid_file_uses_path_fallback(tmp_path: 
 
     await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    assert any(part.get("type") == "video_url" for part in req.contexts[0]["content"])
+    assert req.contexts == []
+    assert any(part.get("type") == "video_url" for part in await _assembled_content(req))
 
 
 @pytest.mark.asyncio
@@ -440,8 +443,8 @@ async def test_kimi_auto_uses_base64_for_small_local_video(tmp_path: Path):
     with patch("openai.AsyncOpenAI", FailAsyncOpenAI):
         await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
+    assert req.contexts == []
+    content = await _assembled_content(req)
     assert any(
         part.get("type") == "video_url"
         and str(part.get("video_url", {}).get("url", "")).startswith("data:video/")
@@ -490,8 +493,8 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
         await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
+    assert req.contexts == []
+    content = await _assembled_content(req)
     assert any(
         part.get("type") == "video_url"
         and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
@@ -546,8 +549,8 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
     ):
         await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
+    assert req.contexts == []
+    content = await _assembled_content(req)
     assert any(
         part.get("type") == "video_url"
         and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
@@ -595,8 +598,8 @@ async def test_opencode_kimi_remote_video_uses_base64_not_public_url(tmp_path: P
     with patch.object(Video, "convert_to_file_path", fake_convert_to_file_path):
         await plugin.inject_quoted_video(event, req)
 
-    assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
+    assert req.contexts == []
+    content = await _assembled_content(req)
     assert any(
         part.get("type") == "video_url"
         and str(part.get("video_url", {}).get("url", "")).startswith("data:video/")
@@ -650,8 +653,9 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
         part.get("type") == "text" and "用户当前问题：这个视频在讲什么？" in part.get("text", "")
         for part in user_content
     )
-    assert len(req.contexts) == 1
-    rewritten = req.contexts[0]["content"]
+    assert req.contexts == []
+    assert req.prompt == event.message_str
+    rewritten = await _assembled_content(req)
     assert any(
         part.get("type") == "text"
         and "[引用视频内容转述]" in part.get("text", "")
@@ -704,8 +708,9 @@ async def test_current_provider_falls_back_to_frame_caption_when_video_is_reject
         await plugin.inject_quoted_video(event, req)
 
     assert len(provider.calls) == 2
-    assert len(req.contexts) == 1
-    rewritten = req.contexts[0]["content"]
+    assert req.contexts == []
+    assert req.prompt == event.message_str
+    rewritten = await _assembled_content(req)
     assert any(
         part.get("type") == "text"
         and "frame based summary" in part.get("text", "")

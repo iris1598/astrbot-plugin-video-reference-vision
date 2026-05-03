@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import base64
@@ -24,7 +24,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
-from astrbot.core.agent.message import ContentPart, ImageURLPart
+from astrbot.core.agent.message import ContentPart, ImageURLPart, TextPart
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 
@@ -1623,47 +1623,32 @@ class Main(Star):
         req: ProviderRequest,
         video_parts: list[dict],
     ) -> None:
-        user_message = await req.assemble_context()
-        blocks = _coerce_content_blocks(user_message.get("content"))
+        extra_parts = list(req.extra_user_content_parts or [])
         if bool(self.config.get("remove_default_video_text", True)):
-            blocks = _remove_video_attachment_text_blocks(blocks)
-        normalized_parts: list[dict] = []
+            extra_parts = _remove_video_attachment_text_from_extra_parts(extra_parts)
+        normalized_parts: list[Any] = []
         for part in video_parts:
             if (
                 isinstance(part, dict)
                 and part.get("type") == "video_url"
                 and isinstance(part.get("video_url"), dict)
             ):
-                normalized_parts.append(VideoURLPart.model_validate(part).model_dump())
+                normalized_parts.append(VideoURLPart.model_validate(part))
             else:
                 normalized_parts.append(part)
-        blocks.extend(normalized_parts)
-        if not blocks:
-            blocks = [{"type": "text", "text": "[视频]"}]
-        user_message["content"] = blocks
-
-        req.contexts = list(req.contexts or [])
-        req.contexts.append(user_message)
-        req.prompt = None
         req.image_urls = []
         req.audio_urls = []
-        req.extra_user_content_parts = []
+        req.extra_user_content_parts = extra_parts + normalized_parts
 
     async def _rewrite_request_with_caption_text(
         self,
         req: ProviderRequest,
         caption_text: str,
     ) -> None:
-        user_message = await req.assemble_context()
-        blocks = _coerce_content_blocks(user_message.get("content"))
+        extra_parts = list(req.extra_user_content_parts or [])
         if bool(self.config.get("remove_default_video_text", True)):
-            blocks = _remove_video_attachment_text_blocks(blocks)
-        blocks.append({"type": "text", "text": f"[引用视频内容转述]\n{caption_text}"})
-        user_message["content"] = blocks
-
-        req.contexts = list(req.contexts or [])
-        req.contexts.append(user_message)
-        req.prompt = None
+            extra_parts = _remove_video_attachment_text_from_extra_parts(extra_parts)
+        extra_parts.append(TextPart(text=f"[引用视频内容转述]\n{caption_text}"))
         req.image_urls = []
         req.audio_urls = []
-        req.extra_user_content_parts = []
+        req.extra_user_content_parts = extra_parts
