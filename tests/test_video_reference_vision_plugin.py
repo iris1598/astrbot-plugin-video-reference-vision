@@ -643,7 +643,8 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
     )
     req = ProviderRequest(prompt="这个视频在讲什么？")
 
-    await plugin.inject_quoted_video(event, req)
+    with patch.object(plugin_module.logger, "info") as mock_logger_info:
+        await plugin.inject_quoted_video(event, req)
 
     assert len(caption_provider.calls) == 1
     caption_contexts = caption_provider.calls[0]["contexts"]
@@ -663,6 +664,10 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
         for part in rewritten
     )
     assert not any(part.get("type") == "video_url" for part in rewritten)
+    mock_logger_info.assert_any_call(
+        "video-reference-vision: caption summary: %s",
+        "视频里有人在演示插件配置页面。",
+    )
 
 
 @pytest.mark.asyncio

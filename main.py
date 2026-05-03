@@ -811,6 +811,10 @@ class Main(Star):
                 user_question=self._extract_user_question(event, req),
             )
             if caption_result.summary_text:
+                logger.info(
+                    "video-reference-vision: caption summary: %s",
+                    caption_result.summary_text,
+                )
                 await self._rewrite_request_with_caption_text(
                     req,
                     caption_result.summary_text,
