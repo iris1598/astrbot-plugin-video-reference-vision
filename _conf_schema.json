@@ -112,5 +112,20 @@
     "type": "list",
     "description": "可选：对这些 provider / model 关键字禁用",
     "default": []
+  },
+  "video_caption_provider_id": {
+    "type": "string",
+    "description": "可选：指定一个独立的视频转述模型 Provider ID。留空时默认使用当前聊天模型",
+    "default": ""
+  },
+  "video_caption_prompt": {
+    "type": "string",
+    "description": "视频转述提示词。会直接显示在插件设置里，支持按你的业务改写",
+    "default": "请阅读这个视频，并用中文转述与用户问题直接相关的内容。如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。不要编造视频中没有出现的信息。"
+  },
+  "video_caption_use_current_question": {
+    "type": "bool",
+    "description": "调用视频转述模型时，是否把用户当前问题一并带入提示词",
+    "default": true
   }
 }

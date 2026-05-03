@@ -39,6 +39,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "intercept_direct_video_llm_request": True,
     "provider_allowlist": [],
     "provider_denylist": [],
+    "video_caption_provider_id": "",
+    "video_caption_prompt": (
+        "请阅读这个视频，并用中文转述与用户问题直接相关的内容。"
+        "如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
+        "不要编造视频中没有出现的信息。"
+    ),
+    "video_caption_use_current_question": True,
 }
 
 
@@ -140,7 +147,7 @@ def _detect_video_strategy(
     api_base = str(provider_config.get("api_base", "") or "").lower()
     provider_name = str(provider_config.get("provider", "") or "").lower()
 
-    if any(k in api_base for k in ("moonshot", "kimi")) or "kimi" in model:
+    if any(token in api_base for token in ("moonshot", "kimi")) or "kimi" in model:
         return "kimi"
     if "dashscope" in api_base or "qwen" in model or "qvq" in model:
         return "qwen"
@@ -188,6 +195,7 @@ def _normalize_match_values(value: Any) -> list[str]:
 def _provider_match_text(provider: Any, strategy: str | None) -> str:
     provider_config = getattr(provider, "provider_config", {}) or {}
     parts = [
+        str(provider_config.get("id", "") or ""),
         str(provider_config.get("provider", "") or ""),
         str(provider_config.get("api_base", "") or ""),
         str(getattr(provider, "get_model", lambda: "")() or ""),
@@ -300,6 +308,7 @@ class Main(Star):
         msg_obj = getattr(event, "message_obj", None)
         if msg_obj is None:
             return
+
         videos = [
             comp
             for comp in (getattr(msg_obj, "message", None) or [])
@@ -341,44 +350,70 @@ class Main(Star):
         if not bool(self.config.get("enabled", True)):
             return
 
-        provider = self.context.get_using_provider(getattr(event, "unified_msg_origin", ""))
-        if provider is None:
+        current_provider = self.context.get_using_provider(
+            getattr(event, "unified_msg_origin", "")
+        )
+        if current_provider is None:
             return
 
         mode = str(self.config.get("mode", "auto") or "auto").lower()
-        strategy = _detect_video_strategy(
-            provider,
+        if mode == "off":
+            return
+
+        current_strategy = _detect_video_strategy(
+            current_provider,
             mode=mode,
             prefer_model_metadata_video=bool(
                 self.config.get("prefer_model_metadata_video", True)
             ),
         )
-
-        if self._should_intercept_direct_video_request(event):
-            logger.info("video-reference-vision: intercepted direct video-only request")
-            event.stop_event()
-            return
-
-        if strategy is None:
-            logger.debug("video-reference-vision: skip, provider strategy not matched")
-            return
-        if not _provider_allowed(provider, strategy, self.config):
+        if not _provider_allowed(current_provider, current_strategy, self.config):
             logger.info(
                 "video-reference-vision: skip, provider filtered by allow/deny list"
             )
+            return
+
+        if self._should_intercept_direct_video_request(event):
+            logger.info(
+                "video-reference-vision: intercepted direct non-quoted video request"
+            )
+            event.stop_event()
             return
 
         quoted_videos = self._extract_quoted_videos(event, req=req)
         if not quoted_videos:
             return
 
-        video_parts: list[dict] = []
         max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
-        for video in quoted_videos[:max_videos]:
+        quoted_videos = quoted_videos[:max_videos]
+
+        caption_provider, caption_strategy = self._resolve_video_caption_provider(mode=mode)
+        if caption_provider and caption_strategy:
+            summary_text = await self._summarize_videos_with_provider(
+                videos=quoted_videos,
+                provider=caption_provider,
+                strategy=caption_strategy,
+                user_question=self._extract_user_question(event, req),
+            )
+            if summary_text:
+                await self._rewrite_request_with_caption_text(req, summary_text)
+                return
+            if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                    list(req.extra_user_content_parts or [])
+                )
+                return
+
+        if current_strategy is None:
+            logger.debug("video-reference-vision: skip, provider strategy not matched")
+            return
+
+        video_parts: list[dict] = []
+        for video in quoted_videos:
             part = await self._build_video_part(
                 video,
-                strategy=strategy,
-                provider=provider,
+                strategy=current_strategy,
+                provider=current_provider,
             )
             if part:
                 video_parts.append(part)
@@ -404,11 +439,96 @@ class Main(Star):
         message_chain = getattr(msg_obj, "message", None) or []
         if any(isinstance(comp, Reply) for comp in message_chain):
             return False
+        return any(isinstance(comp, Video) for comp in message_chain)
 
-        has_video = any(isinstance(comp, Video) for comp in message_chain)
-        if not has_video:
-            return False
-        return True
+    def _resolve_video_caption_provider(self, *, mode: str) -> tuple[Any | None, str | None]:
+        provider_id = str(self.config.get("video_caption_provider_id", "") or "").strip()
+        if not provider_id:
+            return None, None
+
+        provider = self.context.get_provider_by_id(provider_id)
+        if provider is None:
+            logger.warning(
+                "video-reference-vision: configured video caption provider not found: %s",
+                provider_id,
+            )
+            return None, None
+
+        strategy = _detect_video_strategy(
+            provider,
+            mode=mode,
+            prefer_model_metadata_video=bool(
+                self.config.get("prefer_model_metadata_video", True)
+            ),
+        )
+        if strategy is None:
+            logger.warning(
+                "video-reference-vision: configured video caption provider does not support video input: %s",
+                provider_id,
+            )
+            return None, None
+        if not _provider_allowed(provider, strategy, self.config):
+            logger.info(
+                "video-reference-vision: configured video caption provider filtered by allow/deny list: %s",
+                provider_id,
+            )
+            return None, None
+        return provider, strategy
+
+    def _extract_user_question(self, event: AstrMessageEvent, req: ProviderRequest) -> str:
+        prompt = str(req.prompt or "").strip()
+        if prompt:
+            return prompt
+        return str(getattr(event, "message_str", "") or "").strip()
+
+    def _build_video_caption_prompt(self, user_question: str) -> str:
+        prompt_text = str(self.config.get("video_caption_prompt", "") or "").strip()
+        if not prompt_text:
+            prompt_text = (
+                "请用中文概括这个视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
+            )
+        if bool(self.config.get("video_caption_use_current_question", True)) and user_question:
+            prompt_text = f"{prompt_text}\n\n用户当前问题：{user_question}"
+        return prompt_text
+
+    async def _summarize_videos_with_provider(
+        self,
+        *,
+        videos: list[Video],
+        provider: Any,
+        strategy: str,
+        user_question: str,
+    ) -> str | None:
+        video_parts: list[dict] = []
+        for video in videos:
+            part = await self._build_video_part(
+                video,
+                strategy=strategy,
+                provider=provider,
+            )
+            if part:
+                video_parts.append(part)
+        if not video_parts:
+            return None
+
+        prompt_text = self._build_video_caption_prompt(user_question)
+        contexts = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt_text}, *video_parts],
+            }
+        ]
+        try:
+            llm_resp = await provider.text_chat(contexts=contexts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("video-reference-vision: video caption request failed: %s", exc)
+            return None
+
+        summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
+        if not summary:
+            logger.warning("video-reference-vision: video caption provider returned empty text")
+            return None
+        return summary
 
     def _extract_quoted_videos(
         self,
@@ -419,6 +539,7 @@ class Main(Star):
         msg_obj = getattr(event, "message_obj", None)
         if msg_obj is None:
             return []
+
         message_chain = getattr(msg_obj, "message", None) or []
         reply_comp: Reply | None = None
         for comp in message_chain:
@@ -528,8 +649,6 @@ class Main(Star):
                 local_path=local_path,
             )
 
-        local_path: str | None = None
-        size_bytes: int | None = None
         if prefer_public_url and _is_http_url(file_ref):
             logger.info("video-reference-vision: using public video URL")
             video_url = file_ref
@@ -554,7 +673,8 @@ class Main(Star):
                 return None
 
             if strategy == "kimi" and self._resolve_kimi_part_mode(
-                strategy=strategy, size_bytes=size_bytes
+                strategy=strategy,
+                size_bytes=size_bytes,
             ) == "upload":
                 logger.info("video-reference-vision: using Kimi upload mode")
                 return await self._build_kimi_upload_video_part(
@@ -614,6 +734,25 @@ class Main(Star):
         blocks.extend(video_parts)
         if not blocks:
             blocks = [{"type": "text", "text": "[视频]"}]
+        user_message["content"] = blocks
+
+        req.contexts = list(req.contexts or [])
+        req.contexts.append(user_message)
+        req.prompt = None
+        req.image_urls = []
+        req.audio_urls = []
+        req.extra_user_content_parts = []
+
+    async def _rewrite_request_with_caption_text(
+        self,
+        req: ProviderRequest,
+        caption_text: str,
+    ) -> None:
+        user_message = await req.assemble_context()
+        blocks = _coerce_content_blocks(user_message.get("content"))
+        if bool(self.config.get("remove_default_video_text", True)):
+            blocks = _remove_video_attachment_text_blocks(blocks)
+        blocks.append({"type": "text", "text": f"[引用视频内容转述]\n{caption_text}"})
         user_message["content"] = blocks
 
         req.contexts = list(req.contexts or [])

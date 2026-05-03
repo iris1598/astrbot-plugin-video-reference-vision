@@ -1,8 +1,8 @@
 name: astrbot_plugin_video_reference_vision
 display_name: 引用视频理解
-desc: 仅在用户引用视频消息时，将视频注入给支持视频输入的多模态模型。
-short_desc: 引用视频时注入 video_url 给支持模型
-version: 0.1.1
+desc: 仅在用户引用视频消息时，将视频注入给支持视频输入的多模态模型，或交给独立的视频转述模型生成摘要。
+short_desc: 引用视频时注入 video_url 或先转述再交给聊天模型
+version: 0.1.2
 author: AstrBot Plugin Contributors
 repo: "https://github.com/Sisyphbaous-DT-Project/astrbot-plugin-video-reference-vision"
 astrbot_version: ">=4.16.0"

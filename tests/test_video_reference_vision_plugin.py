@@ -30,10 +30,18 @@ extract_video_path = plugin_module._extract_path_from_video_attachment_text
 
 
 class DummyProvider:
-    def __init__(self, provider_config: dict, model: str = "") -> None:
+    def __init__(
+        self,
+        provider_config: dict,
+        model: str = "",
+        *,
+        completion_text: str = "",
+    ) -> None:
         self.provider_config = provider_config
         self._model = model or str(provider_config.get("model", ""))
         self._key = str(provider_config.get("key", "") or "")
+        self._completion_text = completion_text
+        self.calls: list[dict] = []
 
     def get_model(self) -> str:
         return self._model
@@ -41,14 +49,24 @@ class DummyProvider:
     def get_current_key(self) -> str:
         return self._key
 
+    async def text_chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(completion_text=self._completion_text)
+
 
 class DummyContext:
-    def __init__(self, provider: DummyProvider) -> None:
+    def __init__(self, provider: DummyProvider, extra_providers: dict[str, DummyProvider] | None = None) -> None:
         self._provider = provider
+        self._extra_providers = extra_providers or {}
 
     def get_using_provider(self, umo: str | None = None):
         del umo
         return self._provider
+
+    def get_provider_by_id(self, provider_id: str):
+        if provider_id == self._provider.provider_config.get("id"):
+            return self._provider
+        return self._extra_providers.get(provider_id)
 
 
 class DummyEvent:
@@ -103,15 +121,76 @@ def test_extract_path_from_video_attachment_text_windows_style():
 
 
 @pytest.mark.asyncio
+async def test_mode_off_does_not_intercept_direct_video(tmp_path: Path):
+    video_file = tmp_path / "off.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "off",
+            "allow_direct_video": False,
+            "intercept_direct_video_llm_request": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:100",
+        message_id="msg_off",
+        message_chain=[Video.fromFileSystem(str(video_file))],
+        message_str="帮我看看这是什么",
+    )
+    req = ProviderRequest(prompt="帮我看看这是什么")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert event.stopped is False
+    assert req.contexts == []
+    assert req.prompt == "帮我看看这是什么"
+
+
+@pytest.mark.asyncio
+async def test_provider_denylist_prevents_direct_intercept(tmp_path: Path):
+    video_file = tmp_path / "deny.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "provider_denylist": ["qwen-vl-max"],
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:101",
+        message_id="msg_deny",
+        message_chain=[Video.fromFileSystem(str(video_file))],
+        message_str="帮我看看这是什么",
+    )
+    req = ProviderRequest(prompt="帮我看看这是什么")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert event.stopped is False
+    assert req.contexts == []
+
+
+@pytest.mark.asyncio
 async def test_direct_video_only_request_is_intercepted(tmp_path: Path):
     video_file = tmp_path / "direct.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "model": "qwen-vl-max",
-        }
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -124,7 +203,7 @@ async def test_direct_video_only_request_is_intercepted(tmp_path: Path):
     )
 
     event = make_event(
-        session_id="platform:group:100",
+        session_id="platform:group:102",
         message_id="msg_direct",
         message_chain=[Video.fromFileSystem(str(video_file))],
         message_str="",
@@ -147,10 +226,7 @@ async def test_direct_video_with_text_is_also_intercepted(tmp_path: Path):
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "model": "qwen-vl-max",
-        }
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -163,7 +239,7 @@ async def test_direct_video_with_text_is_also_intercepted(tmp_path: Path):
     )
 
     event = make_event(
-        session_id="platform:group:100",
+        session_id="platform:group:103",
         message_id="msg_direct_text",
         message_chain=[Video.fromFileSystem(str(video_file))],
         message_str="帮我看看这是什么",
@@ -183,20 +259,16 @@ async def test_capture_and_inject_from_reply_chain_rewrites_request(tmp_path: Pa
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "model": "qwen-vl-max",
-        }
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
     )
     plugin = Main(
         DummyContext(provider),
         config={"enabled": True, "mode": "auto", "max_base64_mb": 10},
     )
 
-    quoted_video = Video.fromFileSystem(str(video_file))
-    reply = Reply(id="msg_video_1", chain=[quoted_video])
+    reply = Reply(id="msg_video_1", chain=[Video.fromFileSystem(str(video_file))])
     event = make_event(
-        session_id="platform:group:101",
+        session_id="platform:group:104",
         message_id="msg_query_2",
         message_chain=[reply],
         message_str="请分析这个视频",
@@ -232,22 +304,19 @@ async def test_inject_from_reply_id_cache_fallback(tmp_path: Path):
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://openrouter.ai/api/v1",
-            "model": "openrouter/any-video-model",
-        }
+        {"id": "chat_openrouter", "api_base": "https://openrouter.ai/api/v1", "model": "openrouter/any-video-model"}
     )
     plugin = Main(DummyContext(provider), config={"enabled": True, "mode": "auto"})
 
     capture_event = make_event(
-        session_id="platform:group:200",
+        session_id="platform:group:105",
         message_id="original_video_msg",
         message_chain=[Video.fromFileSystem(str(video_file))],
     )
     await plugin.capture_video_message(capture_event)
 
     event = make_event(
-        session_id="platform:group:200",
+        session_id="platform:group:105",
         message_id="query_msg",
         message_chain=[Reply(id="original_video_msg", chain=[])],
         message_str="引用视频后提问",
@@ -266,10 +335,7 @@ async def test_provider_allowlist_blocks_non_matching_provider(tmp_path: Path):
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "model": "qwen-vl-max",
-        }
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -281,7 +347,7 @@ async def test_provider_allowlist_blocks_non_matching_provider(tmp_path: Path):
     )
 
     event = make_event(
-        session_id="platform:group:300",
+        session_id="platform:group:106",
         message_id="query_1",
         message_chain=[Reply(id="r1", chain=[Video.fromFileSystem(str(video_file))])],
         message_str="test",
@@ -300,11 +366,7 @@ async def test_kimi_auto_uses_base64_for_small_local_video(tmp_path: Path):
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://api.moonshot.cn/v1",
-            "model": "kimi-k2.5",
-            "key": "k_test_key",
-        }
+        {"id": "chat_kimi", "api_base": "https://api.moonshot.cn/v1", "model": "kimi-k2.5", "key": "k_test_key"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -317,7 +379,7 @@ async def test_kimi_auto_uses_base64_for_small_local_video(tmp_path: Path):
     )
 
     event = make_event(
-        session_id="platform:group:400",
+        session_id="platform:group:107",
         message_id="query_2",
         message_chain=[Reply(id="k1", chain=[Video.fromFileSystem(str(video_file))])],
         message_str="read this video",
@@ -346,11 +408,7 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
     video_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
 
     provider = DummyProvider(
-        {
-            "api_base": "https://api.moonshot.cn/v1",
-            "model": "kimi-k2.5",
-            "key": "k_test_key",
-        }
+        {"id": "chat_kimi", "api_base": "https://api.moonshot.cn/v1", "model": "kimi-k2.5", "key": "k_test_key"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -364,7 +422,7 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
     )
 
     event = make_event(
-        session_id="platform:group:401",
+        session_id="platform:group:108",
         message_id="query_3",
         message_chain=[Reply(id="k2", chain=[Video.fromFileSystem(str(video_file))])],
         message_str="read this video",
@@ -400,11 +458,7 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
     local_video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
-        {
-            "api_base": "https://api.moonshot.cn/v1",
-            "model": "kimi-k2.5",
-            "key": "k_test_key",
-        }
+        {"id": "chat_kimi", "api_base": "https://api.moonshot.cn/v1", "model": "kimi-k2.5", "key": "k_test_key"}
     )
     plugin = Main(
         DummyContext(provider),
@@ -423,7 +477,7 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
         return str(local_video)
 
     event = make_event(
-        session_id="platform:group:402",
+        session_id="platform:group:109",
         message_id="query_4",
         message_chain=[Reply(id="k3", chain=[remote_video])],
         message_str="read this remote video",
@@ -454,9 +508,62 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
     )
 
 
+@pytest.mark.asyncio
+async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path: Path):
+    video_file = tmp_path / "caption.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    chat_provider = DummyProvider(
+        {"id": "chat_text", "api_base": "https://api.example.com/v1", "provider": "openai_chat_completion", "model": "text-only-model"}
+    )
+    caption_provider = DummyProvider(
+        {"id": "video_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"},
+        completion_text="视频里有人在演示插件配置页面。",
+    )
+    plugin = Main(
+        DummyContext(chat_provider, {"video_qwen": caption_provider}),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "video_caption_provider_id": "video_qwen",
+            "video_caption_prompt": "请帮我转述这个视频",
+            "video_caption_use_current_question": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:110",
+        message_id="query_5",
+        message_chain=[Reply(id="r2", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    req = ProviderRequest(prompt="这个视频在讲什么？")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert len(caption_provider.calls) == 1
+    caption_contexts = caption_provider.calls[0]["contexts"]
+    user_content = caption_contexts[0]["content"]
+    assert any(part.get("type") == "video_url" for part in user_content)
+    assert any(
+        part.get("type") == "text" and "用户当前问题：这个视频在讲什么？" in part.get("text", "")
+        for part in user_content
+    )
+    assert len(req.contexts) == 1
+    rewritten = req.contexts[0]["content"]
+    assert any(
+        part.get("type") == "text"
+        and "[引用视频内容转述]" in part.get("text", "")
+        and "视频里有人在演示插件配置页面。" in part.get("text", "")
+        for part in rewritten
+    )
+    assert not any(part.get("type") == "video_url" for part in rewritten)
+
+
 def test_global_llm_metadata_is_used_for_strategy_detection():
     provider = DummyProvider(
         {
+            "id": "chat_custom",
             "provider": "openai_chat_completion",
             "api_base": "https://example.com/v1",
             "modalities": None,
