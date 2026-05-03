@@ -1,6 +1,6 @@
 ﻿# 引用视频理解
 
-> 注意：目前本插件的视频转述模型仅保证兼容 Moonshot 官方 API（`api.moonshot.cn`）；其他平台/代理网关（如 OpenAI-compatible 聚合网关）暂未适配视频输入。
+> 注意：目前本插件的视频转述模型仅保证兼容 Moonshot 官方 API（`api.moonshot.ai` / `api.moonshot.cn`）和 Kimi Code（`api.kimi.com/coding/v1`）；其他平台/代理网关（如 OpenAI-compatible 聚合网关）暂未适配视频输入。
 > 作者主页：https://github.com/Sisyphbaous-DT-Project
 
 给 AstrBot 用的一个小插件：用户引用一条视频消息提问时，插件会尽量把“被引用的视频内容”变成模型真正能理解的输入，而不是只把 AstrBot 默认的附件提示文本发过去。
@@ -182,6 +182,9 @@ README.md
 
 - `video_caption_provider_id`：单独指定视频转述模型。留空时会优先用当前聊天模型做转述。
 - `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
+- `video_caption_direct_enabled`：启用插件内独立视频转述通道。
+- `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` / `kimicode` 会强制按 Kimi 视频输入链路处理，`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
+- `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。
 - `video_caption_prompt`：发给视频转述模型的提示词。
 - `video_caption_use_current_question`：转述时是否带上用户当前问题。
 

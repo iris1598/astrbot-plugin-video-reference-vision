@@ -27,6 +27,7 @@ spec.loader.exec_module(plugin_module)
 VideoMessageCache = plugin_module.VideoMessageCache
 Main = plugin_module.Main
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
+detect_video_strategy = plugin_module._detect_video_strategy
 
 
 class DummyProvider:
@@ -610,6 +611,123 @@ async def test_opencode_kimi_remote_video_uses_base64_not_public_url(tmp_path: P
         and str(part.get("video_url", {}).get("url", "")).startswith("https://")
         for part in content
     )
+
+
+@pytest.mark.asyncio
+async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
+    video_file = tmp_path / "kimi_code_big.mp4"
+    video_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+    provider = DummyProvider(
+        {
+            "id": "chat_kimi_code",
+            "api_base": "https://api.kimi.com/coding/v1",
+            "model": "kimi-k2.6",
+            "key": "kc_test_key",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "auto",
+            "max_base64_mb": 1,
+            "kimi_upload_on_oversize": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:109c",
+        message_id="query_4c",
+        message_chain=[Reply(id="k3c", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="read this video",
+    )
+    req = ProviderRequest(prompt="read this video")
+
+    class FakeFiles:
+        async def create(self, file, purpose):
+            assert purpose == "video"
+            return SimpleNamespace(id="file_test_kimicode")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, api_key, base_url):
+            assert api_key == "kc_test_key"
+            assert base_url == "https://api.kimi.com/coding/v1"
+            self.files = FakeFiles()
+
+    with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+        await plugin.inject_quoted_video(event, req)
+
+    content = await _assembled_content(req)
+    assert any(
+        part.get("type") == "video_url"
+        and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
+        for part in content
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_transport_kimicode_forces_kimi_upload_on_custom_base(tmp_path: Path):
+    video_file = tmp_path / "direct_kimicode_big.mp4"
+    video_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+    chat_provider = DummyProvider(
+        {"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text-only-model"}
+    )
+    plugin = Main(
+        DummyContext(chat_provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "auto",
+            "max_base64_mb": 1,
+            "kimi_upload_on_oversize": True,
+            "video_caption_direct_enabled": True,
+            "video_caption_direct_transport": "kimicode",
+            "video_caption_direct_base_url": "https://proxy.example.com/v1",
+            "video_caption_direct_api_key": "direct_test_key",
+            "video_caption_direct_model": "kimi-k2.6",
+        },
+    )
+
+    provider = plugin._build_direct_caption_provider()
+    assert provider is not None
+    assert detect_video_strategy(provider, mode="force") == "kimi"
+
+    class FakeFiles:
+        async def create(self, file, purpose):
+            assert purpose == "video"
+            return SimpleNamespace(id="file_test_direct_kimicode")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, api_key, base_url):
+            assert api_key == "direct_test_key"
+            assert base_url == "https://proxy.example.com/v1"
+            self.files = FakeFiles()
+
+    with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+        part = await plugin._build_video_part(
+            Video.fromFileSystem(str(video_file)),
+            strategy=detect_video_strategy(provider, mode="force"),
+            provider=provider,
+        )
+
+    assert part is not None
+    assert str(part.get("video_url", {}).get("url", "")).startswith("ms://")
+
+
+def test_direct_transport_generic_disables_kimi_transport_override():
+    provider = plugin_module.DirectCaptionProvider(
+        provider_id="__video_caption_direct__",
+        transport="generic",
+        api_base="https://proxy.example.com/v1",
+        api_key="direct_test_key",
+        model="kimi-k2.6",
+        timeout_seconds=30,
+    )
+
+    assert detect_video_strategy(provider, mode="force") == "generic"
 
 
 @pytest.mark.asyncio

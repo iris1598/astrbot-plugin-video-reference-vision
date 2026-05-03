@@ -145,6 +145,18 @@
     "hint": "开启后，插件会优先直接使用下面填写的 base_url、api_key 和模型 id 做视频转述，不再依赖 AstrBot 当前聊天 provider 的视频能力。",
     "default": false
   },
+  "video_caption_direct_transport": {
+    "type": "string",
+    "description": "独立转述视频传输方式",
+    "hint": "`auto` 自动判断；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 按 Kimi Code 方式处理视频；`generic` 则按通用 OpenAI-compatible 方式处理。",
+    "default": "auto",
+    "options": [
+      "auto",
+      "moonshot",
+      "kimicode",
+      "generic"
+    ]
+  },
   "video_caption_direct_base_url": {
     "type": "string",
     "description": "独立转述 Base URL",

@@ -34,6 +34,15 @@ DEFAULT_VIDEO_CAPTION_PROMPT = (
     "不要编造没有出现的信息。"
 )
 
+VIDEO_TRANSPORT_AUTO = "auto"
+VIDEO_TRANSPORT_GENERIC = "generic"
+VIDEO_TRANSPORT_KIMI_MOONSHOT = "moonshot"
+VIDEO_TRANSPORT_KIMI_KIMICODE = "kimicode"
+KIMI_VIDEO_TRANSPORTS = {
+    VIDEO_TRANSPORT_KIMI_MOONSHOT,
+    VIDEO_TRANSPORT_KIMI_KIMICODE,
+}
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
@@ -65,6 +74,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_frame_count": 4,
     "native_video_injection_fallback": True,
     "video_caption_direct_enabled": False,
+    "video_caption_direct_transport": VIDEO_TRANSPORT_AUTO,
     "video_caption_direct_base_url": "",
     "video_caption_direct_api_key": "",
     "video_caption_direct_model": "",
@@ -101,9 +111,33 @@ def _provider_api_base(provider: Any) -> str:
     return str(provider_config.get("api_base", "") or "").strip().lower()
 
 
+def _normalize_video_transport(value: Any) -> str:
+    transport = str(value or "").strip().lower()
+    if transport in {
+        VIDEO_TRANSPORT_AUTO,
+        VIDEO_TRANSPORT_GENERIC,
+        VIDEO_TRANSPORT_KIMI_MOONSHOT,
+        VIDEO_TRANSPORT_KIMI_KIMICODE,
+    }:
+        return transport
+    return VIDEO_TRANSPORT_AUTO
+
+
+def _provider_video_transport(provider: Any) -> str:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    return _normalize_video_transport(provider_config.get("video_transport"))
+
+
 def _supports_kimi_file_upload(provider: Any) -> bool:
+    transport = _provider_video_transport(provider)
+    if transport in KIMI_VIDEO_TRANSPORTS:
+        return True
     api_base = _provider_api_base(provider)
-    return "moonshot" in api_base or "kimi.ai" in api_base
+    return (
+        "moonshot" in api_base
+        or "kimi.ai" in api_base
+        or "api.kimi.com/coding" in api_base
+    )
 
 
 def _is_video_attachment_text(text: str) -> bool:
@@ -195,6 +229,12 @@ def _detect_video_strategy(
     model = str(getattr(provider, "get_model", lambda: "")() or "").lower()
     api_base = _provider_api_base(provider)
     provider_name = str(provider_config.get("provider", "") or "").lower()
+    transport = _provider_video_transport(provider)
+
+    if transport in KIMI_VIDEO_TRANSPORTS:
+        return "kimi"
+    if transport == VIDEO_TRANSPORT_GENERIC:
+        return "generic"
 
     if any(token in api_base for token in ("moonshot", "kimi")) or "kimi" in model:
         return "kimi"
@@ -444,16 +484,19 @@ class DirectCaptionProvider:
         self,
         *,
         provider_id: str,
+        transport: str,
         api_base: str,
         api_key: str,
         model: str,
         timeout_seconds: int,
     ) -> None:
+        normalized_transport = _normalize_video_transport(transport)
         self.provider_config = {
             "id": provider_id,
             "provider": "openai_chat_completion",
             "api_base": api_base,
             "model": model,
+            "video_transport": normalized_transport,
             "model_metadata": {
                 "modalities": {
                     "input": ["text", "image", "video"],
@@ -568,6 +611,9 @@ class Main(Star):
     def _get_direct_caption_provider_config(self) -> dict[str, Any]:
         return {
             "enabled": bool(self.config.get("video_caption_direct_enabled", False)),
+            "transport": _normalize_video_transport(
+                self.config.get("video_caption_direct_transport", VIDEO_TRANSPORT_AUTO)
+            ),
             "api_base": str(
                 self.config.get("video_caption_direct_base_url", "") or ""
             ).strip(),
@@ -607,6 +653,7 @@ class Main(Star):
         direct_config = self._get_direct_caption_provider_config()
         return DirectCaptionProvider(
             provider_id="__video_caption_direct__",
+            transport=direct_config["transport"],
             api_base=direct_config["api_base"],
             api_key=direct_config["api_key"],
             model=direct_config["model"],
@@ -1602,11 +1649,12 @@ class Main(Star):
             from openai import AsyncOpenAI
 
             provider_config = getattr(provider, "provider_config", {}) or {}
-            api_base = str(
-                self.config.get("kimi_api_base")
-                or provider_config.get("api_base")
-                or "https://api.moonshot.cn/v1"
-            )
+            direct_api_base = str(provider_config.get("api_base") or "").strip()
+            configured_api_base = str(self.config.get("kimi_api_base") or "").strip()
+            if _is_direct_caption_provider(provider):
+                api_base = direct_api_base or configured_api_base or "https://api.moonshot.cn/v1"
+            else:
+                api_base = configured_api_base or direct_api_base or "https://api.moonshot.cn/v1"
             api_key = str(getattr(provider, "get_current_key", lambda: "")() or "")
             if not api_key:
                 logger.warning("video-reference-vision: missing api key for Kimi upload")
