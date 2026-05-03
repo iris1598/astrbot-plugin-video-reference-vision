@@ -1,0 +1,13 @@
+name: astrbot_plugin_video_reference_vision
+display_name: 引用视频理解
+desc: 仅在用户引用视频消息时，将视频注入给支持视频输入的多模态模型。
+short_desc: 引用视频时注入 video_url 给支持模型
+version: 0.1.1
+author: AstrBot Plugin Contributors
+repo: ""
+astrbot_version: ">=4.16.0"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - discord
+  - slack

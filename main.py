@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+import base64
+import mimetypes
+import os
+import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from astrbot import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Reply, Video
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.star import Context, Star
+
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    "mode": "auto",  # auto | force | off
+    "prefer_public_url": True,
+    "max_base64_mb": 20,
+    "fallback_behavior": "keep_text",  # keep_text | silent
+    "prefer_model_metadata_video": True,
+    "qwen_fps": 2.0,
+    "generic_fps": 2.0,
+    "kimi_strategy": "auto",  # auto | upload | base64
+    "kimi_upload_on_oversize": True,
+    "kimi_api_base": "",
+    "max_videos_per_message": 3,
+    "max_videos_per_request": 1,
+    "cache_ttl_seconds": 7200,
+    "cache_max_entries": 500,
+    "remove_default_video_text": True,
+    "allow_direct_video": False,
+}
+
+
+def _normalized_message_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text
+
+
+def _is_http_url(url: str) -> bool:
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def _is_video_attachment_text(text: str) -> bool:
+    return text.startswith("[Video Attachment")
+
+
+_VIDEO_ATTACHMENT_PATH_RE = re.compile(
+    r"^\[Video Attachment(?: in quoted message)?: name .*?, path (?P<path>.+)\]$"
+)
+
+
+def _extract_path_from_video_attachment_text(text: str) -> str | None:
+    if not _is_video_attachment_text(text):
+        return None
+    match = _VIDEO_ATTACHMENT_PATH_RE.match(text.strip())
+    if not match:
+        return None
+    path = str(match.group("path") or "").strip()
+    return path or None
+
+
+def _coerce_content_blocks(content: Any) -> list[dict]:
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, str):
+        text = content.strip()
+        if not text:
+            return []
+        return [{"type": "text", "text": text}]
+    return []
+
+
+def _get_provider_modalities(provider: Any) -> list[str]:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    modalities = provider_config.get("modalities")
+    if isinstance(modalities, list):
+        return [str(x).lower() for x in modalities]
+
+    model_metadata = provider_config.get("model_metadata")
+    if isinstance(model_metadata, dict):
+        inputs = model_metadata.get("modalities", {}).get("input", [])
+        if isinstance(inputs, list):
+            return [str(x).lower() for x in inputs]
+
+    return []
+
+
+def _remove_video_attachment_text_blocks(content_blocks: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            cleaned.append(block)
+            continue
+        if block.get("type") != "text":
+            cleaned.append(block)
+            continue
+        text = str(block.get("text", ""))
+        if _is_video_attachment_text(text):
+            continue
+        cleaned.append(block)
+    return cleaned
+
+
+def _remove_video_attachment_text_from_extra_parts(extra_parts: list[Any]) -> list[Any]:
+    cleaned: list[Any] = []
+    for part in extra_parts:
+        text = getattr(part, "text", None)
+        if isinstance(text, str) and _is_video_attachment_text(text):
+            continue
+        cleaned.append(part)
+    return cleaned
+
+
+def _detect_video_strategy(
+    provider: Any,
+    mode: str,
+    *,
+    prefer_model_metadata_video: bool = True,
+) -> str | None:
+    if mode == "off":
+        return None
+
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    model = str(getattr(provider, "get_model", lambda: "")() or "").lower()
+    api_base = str(provider_config.get("api_base", "") or "").lower()
+    provider_name = str(provider_config.get("provider", "") or "").lower()
+
+    if any(k in api_base for k in ("moonshot", "kimi")) or "kimi" in model:
+        return "kimi"
+    if "dashscope" in api_base or "qwen" in model or "qvq" in model:
+        return "qwen"
+    if "openrouter.ai" in api_base:
+        return "openrouter"
+    if "mimo" in model or "xiaomi" in model:
+        return "openrouter"
+
+    modalities = _get_provider_modalities(provider) if prefer_model_metadata_video else []
+    if "video" in modalities:
+        return "generic"
+
+    if provider_name in {"openai", "openai_chat_completion"}:
+        if mode == "force":
+            return "generic"
+        return None
+
+    if mode == "force":
+        return "generic"
+    return None
+
+
+def _guess_mime(path: str) -> str:
+    mime_type = mimetypes.guess_type(path)[0]
+    if mime_type and mime_type.startswith("video/"):
+        return mime_type
+    return "video/mp4"
+
+
+def _file_to_data_url(path: str) -> str:
+    mime_type = _guess_mime(path)
+    payload = base64.b64encode(Path(path).read_bytes()).decode("utf-8")
+    return f"data:{mime_type};base64,{payload}"
+
+
+def _is_kimi_strategy_upload(config: dict[str, Any], strategy: str) -> bool:
+    kimi_strategy = str(config.get("kimi_strategy", "auto") or "auto").lower()
+    if strategy != "kimi":
+        return False
+    return kimi_strategy in {"upload", "auto"}
+
+
+@dataclass
+class CachedVideoMessage:
+    session_id: str
+    message_id: str
+    videos: list[dict[str, str]]
+    sender_id: str
+    timestamp: int
+    expires_at: int
+
+
+class VideoMessageCache:
+    def __init__(self, ttl_seconds: int, max_entries: int) -> None:
+        self.ttl_seconds = max(1, int(ttl_seconds))
+        self.max_entries = max(1, int(max_entries))
+        self._items: OrderedDict[tuple[str, str], CachedVideoMessage] = OrderedDict()
+
+    def put(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        videos: list[dict[str, str]],
+        sender_id: str,
+        timestamp: int,
+        now_ts: int | None = None,
+    ) -> None:
+        sid = session_id.strip()
+        mid = _normalized_message_id(message_id)
+        if not sid or not mid or not videos:
+            return
+        now = int(now_ts or time.time())
+        key = (sid, mid)
+        self._items[key] = CachedVideoMessage(
+            session_id=sid,
+            message_id=mid,
+            videos=videos,
+            sender_id=sender_id,
+            timestamp=int(timestamp),
+            expires_at=now + self.ttl_seconds,
+        )
+        self._items.move_to_end(key)
+        self._prune(now)
+
+    def get(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        now_ts: int | None = None,
+    ) -> CachedVideoMessage | None:
+        sid = session_id.strip()
+        mid = _normalized_message_id(message_id)
+        if not sid or not mid:
+            return None
+        now = int(now_ts or time.time())
+        self._prune(now)
+        key = (sid, mid)
+        item = self._items.get(key)
+        if not item:
+            return None
+        self._items.move_to_end(key)
+        return item
+
+    def _prune(self, now_ts: int | None = None) -> None:
+        now = int(now_ts or time.time())
+        expired_keys = [
+            key for key, item in self._items.items() if int(item.expires_at) <= now
+        ]
+        for key in expired_keys:
+            self._items.pop(key, None)
+        while len(self._items) > self.max_entries:
+            self._items.popitem(last=False)
+
+
+class Main(Star):
+    def __init__(self, context: Context, config: dict | None = None) -> None:
+        super().__init__(context, config)
+        merged = dict(DEFAULT_CONFIG)
+        if isinstance(config, dict):
+            merged.update(config)
+        self.config = merged
+        self.video_cache = VideoMessageCache(
+            ttl_seconds=int(self.config.get("cache_ttl_seconds", 7200)),
+            max_entries=int(self.config.get("cache_max_entries", 500)),
+        )
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10_000)
+    async def capture_video_message(self, event: AstrMessageEvent) -> None:
+        if not bool(self.config.get("enabled", True)):
+            return
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is None:
+            return
+        videos = [
+            comp
+            for comp in (getattr(msg_obj, "message", None) or [])
+            if isinstance(comp, Video)
+        ]
+        if not videos:
+            return
+
+        max_videos = max(1, int(self.config.get("max_videos_per_message", 3)))
+        videos = videos[:max_videos]
+        serialized_videos = []
+        for video in videos:
+            serialized_videos.append(
+                {
+                    "file": str(video.file),
+                    "cover": str(video.cover or ""),
+                    "path": str(video.path or ""),
+                }
+            )
+
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        message_id = _normalized_message_id(getattr(msg_obj, "message_id", ""))
+        sender = getattr(msg_obj, "sender", None)
+        sender_id = str(getattr(sender, "user_id", "") or "")
+        timestamp = int(getattr(msg_obj, "timestamp", int(time.time())))
+        self.video_cache.put(
+            session_id=session_id,
+            message_id=message_id,
+            videos=serialized_videos,
+            sender_id=sender_id,
+            timestamp=timestamp,
+        )
+
+    @filter.on_llm_request(priority=10_000)
+    async def inject_quoted_video(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        if not bool(self.config.get("enabled", True)):
+            return
+
+        quoted_videos = self._extract_quoted_videos(event, req=req)
+        if not quoted_videos:
+            return
+
+        provider = self.context.get_using_provider(getattr(event, "unified_msg_origin", ""))
+        if provider is None:
+            return
+
+        mode = str(self.config.get("mode", "auto") or "auto").lower()
+        strategy = _detect_video_strategy(
+            provider,
+            mode=mode,
+            prefer_model_metadata_video=bool(
+                self.config.get("prefer_model_metadata_video", True)
+            ),
+        )
+        if strategy is None:
+            logger.debug("video-reference-vision: 跳过处理，未匹配到可用的视频模型策略")
+            return
+
+        video_parts: list[dict] = []
+        max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
+        for video in quoted_videos[:max_videos]:
+            part = await self._build_video_part(
+                video,
+                strategy=strategy,
+                provider=provider,
+            )
+            if part:
+                video_parts.append(part)
+
+        if not video_parts:
+            if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                    list(req.extra_user_content_parts or [])
+                )
+            return
+
+        await self._rewrite_request_with_video_parts(req, video_parts)
+
+    def _extract_quoted_videos(
+        self,
+        event: AstrMessageEvent,
+        *,
+        req: ProviderRequest | None = None,
+    ) -> list[Video]:
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is None:
+            return []
+        message_chain = getattr(msg_obj, "message", None) or []
+        reply_comp: Reply | None = None
+        for comp in message_chain:
+            if isinstance(comp, Reply):
+                reply_comp = comp
+                break
+        if reply_comp is None:
+            if bool(self.config.get("allow_direct_video", False)):
+                return [comp for comp in message_chain if isinstance(comp, Video)]
+            return []
+
+        if reply_comp.chain:
+            videos = [comp for comp in reply_comp.chain if isinstance(comp, Video)]
+            if videos:
+                return videos
+
+        reply_id = _normalized_message_id(getattr(reply_comp, "id", ""))
+        if not reply_id:
+            return []
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        cached = self.video_cache.get(session_id=session_id, message_id=reply_id)
+        hydrated: list[Video] = []
+        if cached:
+            for video_entry in cached.videos:
+                file_ref = str(video_entry.get("file", "") or "")
+                path_ref = str(video_entry.get("path", "") or "")
+                ref = file_ref or path_ref
+                if not ref:
+                    continue
+                hydrated.append(
+                    Video(
+                        file=ref,
+                        cover=str(video_entry.get("cover", "") or ""),
+                        path=path_ref,
+                    )
+                )
+        if hydrated:
+            return hydrated
+        if req is not None:
+            return self._extract_videos_from_request_attachment_text(req)
+        return []
+
+    def _extract_videos_from_request_attachment_text(
+        self,
+        req: ProviderRequest,
+    ) -> list[Video]:
+        videos: list[Video] = []
+        max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
+        for part in list(req.extra_user_content_parts or []):
+            text = getattr(part, "text", None)
+            if not isinstance(text, str):
+                continue
+            path = _extract_path_from_video_attachment_text(text)
+            if not path:
+                continue
+            videos.append(Video(file=path, path=path))
+            if len(videos) >= max_videos:
+                break
+        return videos
+
+    async def _build_video_part(
+        self,
+        video: Video,
+        *,
+        strategy: str,
+        provider: Any,
+    ) -> dict | None:
+        file_ref = str(video.file or "")
+        prefer_public_url = bool(self.config.get("prefer_public_url", True))
+
+        local_path: str | None = None
+        video_url: str | None = None
+        if prefer_public_url and _is_http_url(file_ref):
+            video_url = file_ref
+        else:
+            local_path = await video.convert_to_file_path()
+            if not os.path.exists(local_path):
+                logger.warning(
+                    "video-reference-vision: 本地视频路径不存在：%s", local_path
+                )
+                return None
+
+            max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
+            size_bytes = os.path.getsize(local_path)
+            allow_kimi_upload_on_oversize = bool(
+                self.config.get("kimi_upload_on_oversize", True)
+            )
+            if size_bytes > max_size_mb * 1024 * 1024:
+                if (
+                    allow_kimi_upload_on_oversize
+                    and _is_kimi_strategy_upload(self.config, strategy)
+                ):
+                    return await self._build_kimi_upload_video_part(
+                        provider=provider,
+                        local_path=local_path,
+                    )
+                logger.warning(
+                    "video-reference-vision: 跳过超限视频（%.2fMB > %dMB）：%s",
+                    size_bytes / 1024 / 1024,
+                    max_size_mb,
+                    local_path,
+                )
+                return None
+            video_url = _file_to_data_url(local_path)
+
+        if _is_kimi_strategy_upload(self.config, strategy):
+            # Kimi upload strategy prefers uploading local files.
+            if local_path and os.path.exists(local_path):
+                return await self._build_kimi_upload_video_part(
+                    provider=provider,
+                    local_path=local_path,
+                )
+
+        if not video_url:
+            return None
+
+        part = {"type": "video_url", "video_url": {"url": video_url}}
+        if strategy == "qwen":
+            part["fps"] = float(self.config.get("qwen_fps", 2.0))
+        elif strategy in {"openrouter", "generic"}:
+            part["fps"] = float(self.config.get("generic_fps", 2.0))
+        return part
+
+    async def _build_kimi_upload_video_part(
+        self,
+        *,
+        provider: Any,
+        local_path: str,
+    ) -> dict | None:
+        try:
+            from openai import AsyncOpenAI
+
+            provider_config = getattr(provider, "provider_config", {}) or {}
+            api_base = str(
+                self.config.get("kimi_api_base")
+                or provider_config.get("api_base")
+                or "https://api.moonshot.cn/v1"
+            )
+            api_key = str(getattr(provider, "get_current_key", lambda: "")() or "")
+            if not api_key:
+                logger.warning("video-reference-vision: 缺少 Kimi 上传所需的 API Key")
+                return None
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+            file_obj = await client.files.create(file=Path(local_path), purpose="video")
+            file_id = str(getattr(file_obj, "id", "") or "")
+            if not file_id:
+                logger.warning("video-reference-vision: Kimi 上传结果缺少 file id")
+                return None
+            return {
+                "type": "video_url",
+                "video_url": {"url": f"ms://{file_id}"},
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("video-reference-vision: Kimi 上传失败：%s", exc)
+            return None
+
+    async def _rewrite_request_with_video_parts(
+        self,
+        req: ProviderRequest,
+        video_parts: list[dict],
+    ) -> None:
+        user_message = await req.assemble_context()
+        blocks = _coerce_content_blocks(user_message.get("content"))
+        if bool(self.config.get("remove_default_video_text", True)):
+            blocks = _remove_video_attachment_text_blocks(blocks)
+        blocks.extend(video_parts)
+        if not blocks:
+            blocks = [{"type": "text", "text": "[视频]"}]
+        user_message["content"] = blocks
+
+        req.contexts = list(req.contexts or [])
+        req.contexts.append(user_message)
+        req.prompt = None
+        req.image_urls = []
+        req.audio_urls = []
+        req.extra_user_content_parts = []

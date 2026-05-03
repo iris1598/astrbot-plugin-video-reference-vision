@@ -1,0 +1,101 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "是否启用本插件",
+    "default": true
+  },
+  "mode": {
+    "type": "string",
+    "description": "工作模式：自动识别 / 强制注入 / 关闭",
+    "default": "auto",
+    "options": [
+      "auto",
+      "force",
+      "off"
+    ]
+  },
+  "prefer_public_url": {
+    "type": "bool",
+    "description": "如果视频本身就是公网链接，优先直接使用链接而不是转 base64",
+    "default": true
+  },
+  "prefer_model_metadata_video": {
+    "type": "bool",
+    "description": "优先根据模型元数据判断是否支持视频输入",
+    "default": true
+  },
+  "fallback_behavior": {
+    "type": "string",
+    "description": "注入失败时的处理方式：保留默认文本提示 / 静默移除",
+    "default": "keep_text",
+    "options": [
+      "keep_text",
+      "silent"
+    ]
+  },
+  "max_base64_mb": {
+    "type": "int",
+    "description": "本地视频允许转成 base64 的最大大小（MB）",
+    "default": 20
+  },
+  "qwen_fps": {
+    "type": "float",
+    "description": "Qwen / DashScope 视频输入时使用的抽帧频率",
+    "default": 2.0
+  },
+  "generic_fps": {
+    "type": "float",
+    "description": "通用 OpenAI 兼容视频输入时使用的抽帧频率",
+    "default": 2.0
+  },
+  "kimi_strategy": {
+    "type": "string",
+    "description": "Kimi 视频处理策略：自动 / 上传后引用 / 直接 base64",
+    "default": "auto",
+    "options": [
+      "auto",
+      "upload",
+      "base64"
+    ]
+  },
+  "kimi_upload_on_oversize": {
+    "type": "bool",
+    "description": "视频超过 base64 大小限制时，是否尝试走 Kimi 上传模式",
+    "default": true
+  },
+  "kimi_api_base": {
+    "type": "string",
+    "description": "可选：覆盖 Kimi 的 API Base 地址",
+    "default": ""
+  },
+  "max_videos_per_message": {
+    "type": "int",
+    "description": "每条消息最多缓存多少个视频",
+    "default": 3
+  },
+  "max_videos_per_request": {
+    "type": "int",
+    "description": "每次提问最多注入多少个被引用视频",
+    "default": 1
+  },
+  "cache_ttl_seconds": {
+    "type": "int",
+    "description": "视频缓存保留时长（秒）",
+    "default": 7200
+  },
+  "cache_max_entries": {
+    "type": "int",
+    "description": "全局最多缓存多少条视频消息",
+    "default": 500
+  },
+  "remove_default_video_text": {
+    "type": "bool",
+    "description": "成功注入视频后，是否移除 AstrBot 默认的视频附件文本提示",
+    "default": true
+  },
+  "allow_direct_video": {
+    "type": "bool",
+    "description": "是否允许不引用消息、直接对当前视频做注入",
+    "default": false
+  }
+}
