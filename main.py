@@ -13,6 +13,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -63,6 +64,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_frame_fallback": True,
     "video_caption_frame_count": 4,
     "native_video_injection_fallback": True,
+    "video_caption_direct_enabled": False,
+    "video_caption_direct_base_url": "",
+    "video_caption_direct_api_key": "",
+    "video_caption_direct_model": "",
+    "video_caption_direct_timeout_seconds": 120,
     "ffmpeg_path": "",
     "ffprobe_path": "",
     "enable_gif_input": False,
@@ -253,6 +259,55 @@ def _provider_allowed(provider: Any, strategy: str | None, config: dict[str, Any
     return True
 
 
+def _extract_openai_completion_text(completion: Any) -> str:
+    choices = getattr(completion, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                parts.append(text)
+            continue
+        if isinstance(item, dict):
+            if str(item.get("type", "")).lower() != "text":
+                continue
+            text_value = item.get("text")
+            if isinstance(text_value, str):
+                text = text_value.strip()
+                if text:
+                    parts.append(text)
+            elif isinstance(text_value, dict):
+                text = str(text_value.get("value", "") or "").strip()
+                if text:
+                    parts.append(text)
+            continue
+        text_value = getattr(item, "text", None)
+        if isinstance(text_value, str):
+            text = text_value.strip()
+            if text:
+                parts.append(text)
+            continue
+        nested_text = str(getattr(text_value, "value", "") or "").strip()
+        if nested_text:
+            parts.append(nested_text)
+    return "\n".join(parts).strip()
+
+
+def _is_direct_caption_provider(provider: Any) -> bool:
+    return _provider_id(provider) == "__video_caption_direct__"
+
+
 def _media_file_ref(media: SupportedMedia) -> str:
     if isinstance(media, Image):
         return str(media.url or media.file or "")
@@ -374,6 +429,56 @@ class CaptionAttemptResult:
         return self.video_rejected or self.image_rejected
 
 
+class DirectCaptionProvider:
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        api_base: str,
+        api_key: str,
+        model: str,
+        timeout_seconds: int,
+    ) -> None:
+        self.provider_config = {
+            "id": provider_id,
+            "provider": "openai_chat_completion",
+            "api_base": api_base,
+            "model": model,
+            "model_metadata": {
+                "modalities": {
+                    "input": ["text", "image", "video"],
+                    "output": ["text"],
+                }
+            },
+        }
+        self._api_key = api_key
+        self._model = model
+        self._timeout_seconds = max(10, int(timeout_seconds))
+
+    def get_model(self) -> str:
+        return self._model
+
+    def get_current_key(self) -> str:
+        return self._api_key
+
+    async def text_chat(self, **kwargs):
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=str(self.provider_config.get("api_base", "") or ""),
+            timeout=self._timeout_seconds,
+        )
+        completion = await client.chat.completions.create(
+            model=self._model,
+            messages=list(kwargs.get("contexts") or []),
+            stream=False,
+        )
+        return SimpleNamespace(
+            completion_text=_extract_openai_completion_text(completion)
+        )
+
+
 class VideoMessageCache:
     def __init__(self, ttl_seconds: int, max_entries: int) -> None:
         self.ttl_seconds = max(1, int(ttl_seconds))
@@ -449,6 +554,132 @@ class Main(Star):
             ttl_seconds=int(self.config.get("cache_ttl_seconds", 7200)),
             max_entries=int(self.config.get("cache_max_entries", 500)),
         )
+
+    def _get_direct_caption_provider_config(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.config.get("video_caption_direct_enabled", False)),
+            "api_base": str(
+                self.config.get("video_caption_direct_base_url", "") or ""
+            ).strip(),
+            "api_key": str(
+                self.config.get("video_caption_direct_api_key", "") or ""
+            ).strip(),
+            "model": str(self.config.get("video_caption_direct_model", "") or "").strip(),
+            "timeout_seconds": int(
+                self.config.get("video_caption_direct_timeout_seconds", 120)
+            ),
+        }
+
+    def _get_missing_direct_caption_config_keys(
+        self,
+        *,
+        require_enabled: bool = True,
+    ) -> list[str]:
+        direct_config = self._get_direct_caption_provider_config()
+        missing: list[str] = []
+        if require_enabled and not direct_config["enabled"]:
+            missing.append("video_caption_direct_enabled")
+        for key in ("api_base", "api_key", "model"):
+            if not direct_config[key]:
+                missing.append(f"video_caption_direct_{key}")
+        return missing
+
+    def _build_direct_caption_provider(
+        self,
+        *,
+        require_enabled: bool = True,
+    ) -> DirectCaptionProvider | None:
+        missing_keys = self._get_missing_direct_caption_config_keys(
+            require_enabled=require_enabled
+        )
+        if missing_keys:
+            return None
+        direct_config = self._get_direct_caption_provider_config()
+        return DirectCaptionProvider(
+            provider_id="__video_caption_direct__",
+            api_base=direct_config["api_base"],
+            api_key=direct_config["api_key"],
+            model=direct_config["model"],
+            timeout_seconds=direct_config["timeout_seconds"],
+        )
+
+    async def _run_direct_caption_connectivity_check(
+        self,
+        event: AstrMessageEvent,
+    ) -> str:
+        provider = self._build_direct_caption_provider(require_enabled=False)
+        if provider is None:
+            missing_keys = self._get_missing_direct_caption_config_keys(
+                require_enabled=False
+            )
+            return "独立视频转述配置不完整：" + ", ".join(missing_keys)
+
+        reply_id = self._find_reply_id(event)
+        quoted_media = self._extract_quoted_media(event)
+        quoted_media = await self._resolve_unusable_media_with_onebot(
+            event,
+            quoted_media,
+            reply_id,
+        )
+        if quoted_media:
+            result = await self._summarize_media_with_provider(
+                media=quoted_media[:1],
+                provider=provider,
+                strategy=_detect_video_strategy(
+                    provider,
+                    mode="force",
+                    prefer_model_metadata_video=True,
+                ),
+                user_question="请用一句话确认你看到了什么。",
+            )
+            if result.summary_text:
+                return (
+                    "独立视频转述模型测试成功。\n"
+                    f"模型：{provider.get_model()}\n"
+                    f"结果：{result.summary_text}"
+                )
+            if result.video_rejected and result.image_rejected:
+                return (
+                    "独立视频转述模型连通，但视频输入和抽帧图片输入都被拒绝。"
+                )
+            if result.video_rejected:
+                return "独立视频转述模型连通，但当前接口拒绝视频输入。"
+            return "独立视频转述模型已连通，但本次引用视频没有得到可用转述结果。"
+
+        try:
+            llm_resp = await provider.text_chat(
+                contexts=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Reply with OK only.",
+                            }
+                        ],
+                    }
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"独立视频转述模型连通性检查失败：{exc}"
+
+        completion_text = str(getattr(llm_resp, "completion_text", "") or "").strip()
+        return (
+            "独立视频转述模型文本连通性正常。"
+            + (f"\n返回：{completion_text}" if completion_text else "")
+            + "\n如需验证视频输入，请引用一条视频后再执行命令。"
+        )
+
+    @filter.command(
+        "video_ref_test",
+        alias={"测试视频转述模型", "测试视频模型"},
+    )
+    async def test_direct_video_caption_connectivity(
+        self,
+        event: AstrMessageEvent,
+    ):
+        result_text = await self._run_direct_caption_connectivity_check(event)
+        yield event.plain_result(result_text)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10_000)
     async def capture_video_message(self, event: AstrMessageEvent) -> None:
@@ -587,6 +818,15 @@ class Main(Star):
                     "video-reference-vision: current provider rejected media caption input, skip native video injection"
                 )
                 return
+            if _is_direct_caption_provider(caption_provider):
+                if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                    req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                        list(req.extra_user_content_parts or [])
+                    )
+                logger.info(
+                    "video-reference-vision: direct caption provider did not produce summary, skip native video injection"
+                )
+                return
 
         if current_strategy is None:
             if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
@@ -646,6 +886,23 @@ class Main(Star):
         current_provider: Any | None = None,
         current_strategy: str | None = None,
     ) -> tuple[Any | None, str | None, bool]:
+        direct_provider = self._build_direct_caption_provider(require_enabled=True)
+        if direct_provider is not None:
+            direct_strategy = _detect_video_strategy(
+                direct_provider,
+                mode=mode,
+                prefer_model_metadata_video=True,
+            )
+            return direct_provider, direct_strategy, False
+        if bool(self.config.get("video_caption_direct_enabled", False)):
+            missing_keys = self._get_missing_direct_caption_config_keys(
+                require_enabled=True
+            )
+            logger.warning(
+                "video-reference-vision: direct caption provider config incomplete: %s",
+                ", ".join(missing_keys),
+            )
+
         provider_id = str(self.config.get("video_caption_provider_id", "") or "").strip()
         if not provider_id:
             if not bool(self.config.get("video_caption_use_current_provider", True)):

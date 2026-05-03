@@ -139,6 +139,36 @@
     "hint": "命中这些关键字的 provider 或 model 会被跳过，优先级高于启用关键字。",
     "default": []
   },
+  "video_caption_direct_enabled": {
+    "type": "bool",
+    "description": "启用独立视频转述通道",
+    "hint": "开启后，插件会优先直接使用下面填写的 base_url、api_key 和模型 id 做视频转述，不再依赖 AstrBot 当前聊天 provider 的视频能力。",
+    "default": false
+  },
+  "video_caption_direct_base_url": {
+    "type": "string",
+    "description": "独立转述 Base URL",
+    "hint": "独立视频转述模型的 OpenAI-compatible 接口地址，例如 `https://api.example.com/v1`。",
+    "default": ""
+  },
+  "video_caption_direct_api_key": {
+    "type": "string",
+    "description": "独立转述 API Key",
+    "hint": "独立视频转述模型使用的 API Key。配置完成后可用 `/video_ref_test` 或“测试视频模型”命令检查连通性。",
+    "default": ""
+  },
+  "video_caption_direct_model": {
+    "type": "string",
+    "description": "独立转述模型 ID",
+    "hint": "独立视频转述模型的模型名或模型 ID。只影响插件内部的视频转述，不影响 AstrBot 主聊天模型。",
+    "default": ""
+  },
+  "video_caption_direct_timeout_seconds": {
+    "type": "int",
+    "description": "独立转述超时秒数",
+    "hint": "插件直连独立视频转述模型时的请求超时，单位秒。",
+    "default": 120
+  },
   "video_caption_provider_id": {
     "type": "string",
     "description": "视频转述模型",
@@ -181,6 +211,18 @@
     "description": "允许回退原生视频注入",
     "hint": "当转述链路失败后，是否继续把 `video_url` 注入当前聊天模型。关闭后会停在文本/附件回退，不再硬塞视频给不稳定的网关。",
     "default": true
+  },
+  "ffmpeg_path": {
+    "type": "string",
+    "description": "ffmpeg 路径",
+    "hint": "可选手动指定 `ffmpeg` 可执行文件路径。抽帧兜底依赖它；留空时默认使用系统 PATH 里的 `ffmpeg`。",
+    "default": ""
+  },
+  "ffprobe_path": {
+    "type": "string",
+    "description": "ffprobe 路径",
+    "hint": "可选手动指定 `ffprobe` 路径。用于探测视频时长并更均匀地抽帧；留空时默认使用系统 PATH 里的 `ffprobe`。",
+    "default": ""
   },
   "enable_gif_input": {
     "type": "bool",
