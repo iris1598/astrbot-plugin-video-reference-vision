@@ -5,8 +5,10 @@ import base64
 import glob
 import mimetypes
 import os
+import platform
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -16,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
+import uuid
 
 from pydantic import BaseModel
 
@@ -111,6 +114,21 @@ def _provider_api_base(provider: Any) -> str:
     return str(provider_config.get("api_base", "") or "").strip().lower()
 
 
+def _normalize_openai_base_url(value: Any) -> str:
+    base_url = str(value or "").strip()
+    if not base_url:
+        return ""
+    for suffix in (
+        "/chat/completions",
+        "/responses",
+        "/completions",
+        "/messages",
+    ):
+        if base_url.endswith(suffix):
+            return base_url[: -len(suffix)].rstrip("/")
+    return base_url.rstrip("/")
+
+
 def _normalize_video_transport(value: Any) -> str:
     transport = str(value or "").strip().lower()
     if transport in {
@@ -121,6 +139,35 @@ def _normalize_video_transport(value: Any) -> str:
     }:
         return transport
     return VIDEO_TRANSPORT_AUTO
+
+
+def _ascii_header_value(value: Any, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    try:
+        text.encode("ascii")
+        return text
+    except UnicodeEncodeError:
+        normalized = text.encode("ascii", errors="ignore").decode("ascii").strip()
+        return normalized or fallback
+
+
+def _kimi_compat_headers(provider: Any) -> dict[str, str]:
+    transport = _provider_video_transport(provider)
+    if transport != VIDEO_TRANSPORT_KIMI_KIMICODE:
+        api_base = _provider_api_base(provider)
+        if "api.kimi.com/coding" not in api_base:
+            return {}
+    return {
+        "User-Agent": "KimiCLI/compat",
+        "X-Msh-Platform": "kimi_cli",
+        "X-Msh-Version": "compat",
+        "X-Msh-Device-Name": _ascii_header_value(socket.gethostname()),
+        "X-Msh-Device-Model": _ascii_header_value(platform.machine()),
+        "X-Msh-Os-Version": _ascii_header_value(platform.version()),
+        "X-Msh-Device-Id": _ascii_header_value(uuid.getnode(), fallback="0"),
+    }
 
 
 def _provider_video_transport(provider: Any) -> str:
@@ -491,10 +538,11 @@ class DirectCaptionProvider:
         timeout_seconds: int,
     ) -> None:
         normalized_transport = _normalize_video_transport(transport)
+        normalized_api_base = _normalize_openai_base_url(api_base)
         self.provider_config = {
             "id": provider_id,
             "provider": "openai_chat_completion",
-            "api_base": api_base,
+            "api_base": normalized_api_base,
             "model": model,
             "video_transport": normalized_transport,
             "model_metadata": {
@@ -517,10 +565,12 @@ class DirectCaptionProvider:
     async def text_chat(self, **kwargs):
         from openai import AsyncOpenAI
 
+        default_headers = _kimi_compat_headers(self)
         client = AsyncOpenAI(
             api_key=self._api_key,
             base_url=str(self.provider_config.get("api_base", "") or ""),
             timeout=self._timeout_seconds,
+            default_headers=default_headers or None,
         )
         completion = await client.chat.completions.create(
             model=self._model,
@@ -1528,6 +1578,7 @@ class Main(Star):
         *,
         strategy: str,
         size_bytes: int | None,
+        provider: Any | None = None,
     ) -> str:
         kimi_strategy = str(self.config.get("kimi_strategy", "auto") or "auto").lower()
         if strategy != "kimi":
@@ -1536,6 +1587,8 @@ class Main(Star):
             return "upload"
         if kimi_strategy == "base64":
             return "base64"
+        if _provider_video_transport(provider) == VIDEO_TRANSPORT_KIMI_KIMICODE:
+            return "upload"
         max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
         if size_bytes is None:
             return "base64"
@@ -1554,7 +1607,11 @@ class Main(Star):
     ) -> dict | None:
         file_ref = _media_file_ref(media)
         prefer_public_url = bool(self.config.get("prefer_public_url", True))
-        kimi_part_mode = self._resolve_kimi_part_mode(strategy=strategy, size_bytes=None)
+        kimi_part_mode = self._resolve_kimi_part_mode(
+            strategy=strategy,
+            size_bytes=None,
+            provider=provider,
+        )
         mime_hint = _media_mime_hint(media)
         allow_kimi_upload = not _is_gif_media(media)
         kimi_upload_supported = allow_kimi_upload and _supports_kimi_file_upload(provider)
@@ -1620,6 +1677,7 @@ class Main(Star):
                 and self._resolve_kimi_part_mode(
                     strategy=strategy,
                     size_bytes=size_bytes,
+                    provider=provider,
                 )
                 == "upload"
             ):
@@ -1649,8 +1707,10 @@ class Main(Star):
             from openai import AsyncOpenAI
 
             provider_config = getattr(provider, "provider_config", {}) or {}
-            direct_api_base = str(provider_config.get("api_base") or "").strip()
-            configured_api_base = str(self.config.get("kimi_api_base") or "").strip()
+            direct_api_base = _normalize_openai_base_url(provider_config.get("api_base"))
+            configured_api_base = _normalize_openai_base_url(
+                self.config.get("kimi_api_base")
+            )
             if _is_direct_caption_provider(provider):
                 api_base = direct_api_base or configured_api_base or "https://api.moonshot.cn/v1"
             else:
@@ -1659,7 +1719,12 @@ class Main(Star):
             if not api_key:
                 logger.warning("video-reference-vision: missing api key for Kimi upload")
                 return None
-            client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+            default_headers = _kimi_compat_headers(provider)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=api_base,
+                default_headers=default_headers or None,
+            )
             file_obj = await client.files.create(file=Path(local_path), purpose="video")
             file_id = str(getattr(file_obj, "id", "") or "")
             if not file_id:

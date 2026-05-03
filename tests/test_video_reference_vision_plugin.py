@@ -28,6 +28,7 @@ VideoMessageCache = plugin_module.VideoMessageCache
 Main = plugin_module.Main
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
 detect_video_strategy = plugin_module._detect_video_strategy
+normalize_openai_base_url = plugin_module._normalize_openai_base_url
 
 
 class DummyProvider:
@@ -486,9 +487,10 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
             return SimpleNamespace(id="file_test_oversize")
 
     class FakeAsyncOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, default_headers=None):
             assert api_key == "k_test_key"
             assert base_url.startswith("https://api.moonshot.cn")
+            assert default_headers is None
             self.files = FakeFiles()
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
@@ -542,7 +544,8 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
             return SimpleNamespace(id="file_test_remote_upload")
 
     class FakeAsyncOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, default_headers=None):
+            assert default_headers is None
             self.files = FakeFiles()
 
     with patch.object(Video, "convert_to_file_path", fake_convert_to_file_path), patch(
@@ -651,9 +654,11 @@ async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
             return SimpleNamespace(id="file_test_kimicode")
 
     class FakeAsyncOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, default_headers=None):
             assert api_key == "kc_test_key"
             assert base_url == "https://api.kimi.com/coding/v1"
+            assert default_headers is not None
+            assert default_headers["X-Msh-Platform"] == "kimi_cli"
             self.files = FakeFiles()
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
@@ -665,6 +670,55 @@ async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
         and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
         for part in content
     )
+
+
+@pytest.mark.asyncio
+async def test_kimicode_transport_auto_uses_upload_for_small_local_video(tmp_path: Path):
+    video_file = tmp_path / "kimi_code_small.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    chat_provider = DummyProvider(
+        {"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text-only-model"}
+    )
+    plugin = Main(
+        DummyContext(chat_provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "auto",
+            "video_caption_direct_enabled": True,
+            "video_caption_direct_transport": "kimicode",
+            "video_caption_direct_base_url": "https://api.kimi.com/coding/v1",
+            "video_caption_direct_api_key": "direct_test_key",
+            "video_caption_direct_model": "kimi-k2.6",
+        },
+    )
+
+    provider = plugin._build_direct_caption_provider()
+    assert provider is not None
+
+    class FakeFiles:
+        async def create(self, file, purpose):
+            assert purpose == "video"
+            return SimpleNamespace(id="file_test_direct_kimicode_small")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, api_key, base_url, default_headers=None):
+            assert api_key == "direct_test_key"
+            assert base_url == "https://api.kimi.com/coding/v1"
+            assert default_headers is not None
+            assert default_headers["X-Msh-Platform"] == "kimi_cli"
+            self.files = FakeFiles()
+
+    with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+        part = await plugin._build_video_part(
+            Video.fromFileSystem(str(video_file)),
+            strategy=detect_video_strategy(provider, mode="force"),
+            provider=provider,
+        )
+
+    assert part is not None
+    assert str(part.get("video_url", {}).get("url", "")).startswith("ms://")
 
 
 @pytest.mark.asyncio
@@ -701,9 +755,11 @@ async def test_direct_transport_kimicode_forces_kimi_upload_on_custom_base(tmp_p
             return SimpleNamespace(id="file_test_direct_kimicode")
 
     class FakeAsyncOpenAI:
-        def __init__(self, api_key, base_url):
+        def __init__(self, api_key, base_url, default_headers=None):
             assert api_key == "direct_test_key"
             assert base_url == "https://proxy.example.com/v1"
+            assert default_headers is not None
+            assert default_headers["X-Msh-Platform"] == "kimi_cli"
             self.files = FakeFiles()
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
@@ -728,6 +784,53 @@ def test_direct_transport_generic_disables_kimi_transport_override():
     )
 
     assert detect_video_strategy(provider, mode="force") == "generic"
+
+
+@pytest.mark.asyncio
+async def test_direct_kimicode_text_chat_uses_kimi_compat_headers():
+    provider = plugin_module.DirectCaptionProvider(
+        provider_id="__video_caption_direct__",
+        transport="kimicode",
+        api_base="https://api.kimi.com/coding/v1",
+        api_key="direct_test_key",
+        model="kimi-k2.6",
+        timeout_seconds=30,
+    )
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            del kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, api_key, base_url, timeout=None, default_headers=None):
+            assert api_key == "direct_test_key"
+            assert base_url == "https://api.kimi.com/coding/v1"
+            assert timeout == 30
+            assert default_headers is not None
+            assert default_headers["X-Msh-Platform"] == "kimi_cli"
+            assert default_headers["User-Agent"].startswith("KimiCLI/")
+            self.chat = FakeChat()
+
+    with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+        resp = await provider.text_chat(contexts=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+
+    assert resp.completion_text == "ok"
+
+
+def test_normalize_openai_base_url_strips_chat_completions_suffix():
+    assert (
+        normalize_openai_base_url("https://api.kimi.com/coding/v1/chat/completions")
+        == "https://api.kimi.com/coding/v1"
+    )
+    assert (
+        normalize_openai_base_url("https://api.example.com/v1/responses")
+        == "https://api.example.com/v1"
+    )
 
 
 @pytest.mark.asyncio
