@@ -261,6 +261,12 @@ def _media_mime_hint(media: SupportedMedia) -> str | None:
     return None
 
 
+def _normalize_local_file_path(value: str) -> str:
+    if value.startswith("file:///"):
+        return value[8:]
+    return value
+
+
 def _extract_supported_media_from_chain(
     message_chain: list[Any],
     config: dict[str, Any],
@@ -526,6 +532,26 @@ class Main(Star):
             return None, None
         return provider, strategy
 
+    async def _resolve_media_local_path(self, media: SupportedMedia) -> str:
+        file_ref = _media_file_ref(media).strip()
+        path_ref = str(getattr(media, "path", "") or "").strip()
+
+        try:
+            return await media.convert_to_file_path()
+        except Exception as exc:  # noqa: BLE001
+            for candidate in (path_ref, file_ref):
+                normalized = _normalize_local_file_path(candidate.strip())
+                if normalized and os.path.exists(normalized):
+                    logger.info(
+                        "video-reference-vision: fallback to media.path/local file after convert_to_file_path failed: %s",
+                        normalized,
+                    )
+                    return os.path.abspath(normalized)
+
+            raise FileNotFoundError(
+                f"unable to resolve media to local path: file={file_ref!r}, path={path_ref!r}"
+            ) from exc
+
     def _extract_user_question(self, event: AstrMessageEvent, req: ProviderRequest) -> str:
         prompt = str(req.prompt or "").strip()
         if prompt:
@@ -715,11 +741,12 @@ class Main(Star):
         allow_kimi_upload = not _is_gif_media(media)
 
         if strategy == "kimi" and kimi_part_mode == "upload" and allow_kimi_upload:
-            local_path = await media.convert_to_file_path()
-            if not os.path.exists(local_path):
+            try:
+                local_path = await self._resolve_media_local_path(media)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "video-reference-vision: local media path not found: %s",
-                    local_path,
+                    "video-reference-vision: failed to resolve local media path for Kimi upload: %s",
+                    exc,
                 )
                 return None
             logger.info("video-reference-vision: using Kimi upload mode")
@@ -732,11 +759,12 @@ class Main(Star):
             logger.info("video-reference-vision: using public media URL")
             video_url = file_ref
         else:
-            local_path = await media.convert_to_file_path()
-            if not os.path.exists(local_path):
+            try:
+                local_path = await self._resolve_media_local_path(media)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "video-reference-vision: local media path not found: %s",
-                    local_path,
+                    "video-reference-vision: failed to resolve local media path: %s",
+                    exc,
                 )
                 return None
 

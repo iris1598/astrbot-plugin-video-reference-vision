@@ -330,6 +330,31 @@ async def test_inject_from_reply_id_cache_fallback(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_reply_chain_video_with_invalid_file_uses_path_fallback(tmp_path: Path):
+    video_file = tmp_path / "qq_cached.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
+    )
+    plugin = Main(DummyContext(provider), config={"enabled": True, "mode": "auto"})
+
+    reply_video = Video(file="894034488f5679dc30046b8e1af3746a.mp4", path=str(video_file))
+    event = make_event(
+        session_id="platform:group:105b",
+        message_id="query_msg_path_fallback",
+        message_chain=[Reply(id="quoted_qq_video", chain=[reply_video])],
+        message_str="引用视频后提问",
+    )
+    req = ProviderRequest(prompt="引用视频后提问")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert len(req.contexts) == 1
+    assert any(part.get("type") == "video_url" for part in req.contexts[0]["content"])
+
+
+@pytest.mark.asyncio
 async def test_provider_allowlist_blocks_non_matching_provider(tmp_path: Path):
     video_file = tmp_path / "clip3.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
@@ -350,6 +375,28 @@ async def test_provider_allowlist_blocks_non_matching_provider(tmp_path: Path):
         session_id="platform:group:106",
         message_id="query_1",
         message_chain=[Reply(id="r1", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="test",
+    )
+    req = ProviderRequest(prompt="test")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert req.contexts == []
+    assert req.prompt == "test"
+
+
+@pytest.mark.asyncio
+async def test_invalid_video_file_without_fallback_does_not_raise(tmp_path: Path):
+    provider = DummyProvider(
+        {"id": "chat_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
+    )
+    plugin = Main(DummyContext(provider), config={"enabled": True, "mode": "auto"})
+
+    reply_video = Video(file="894034488f5679dc30046b8e1af3746a.mp4", path="")
+    event = make_event(
+        session_id="platform:group:106b",
+        message_id="query_invalid_video",
+        message_chain=[Reply(id="quoted_invalid_video", chain=[reply_video])],
         message_str="test",
     )
     req = ProviderRequest(prompt="test")
