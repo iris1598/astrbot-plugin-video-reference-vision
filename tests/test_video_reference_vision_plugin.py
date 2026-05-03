@@ -706,6 +706,49 @@ async def test_current_provider_media_rejection_skips_native_video_injection(tmp
     assert req.prompt == "这个视频在讲什么？"
 
 
+@pytest.mark.asyncio
+async def test_explicit_current_caption_provider_id_still_skips_native_video_injection(tmp_path: Path):
+    video_file = tmp_path / "reject_same_provider.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "QINGYI-Normal", "api_base": "https://api.example.com/v1", "model": "kimi-k2.5"}
+    )
+
+    async def fake_text_chat(**kwargs):
+        provider.calls.append(kwargs)
+        content = kwargs["contexts"][0]["content"]
+        if any(part.get("type") == "video_url" for part in content):
+            raise RuntimeError("Error code: 400 - {'error': {'message': 'Error from provider: No endpoints found that support input video', 'code': 404}}")
+        raise RuntimeError("ffmpeg fallback unavailable")
+
+    provider.text_chat = fake_text_chat
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "video_caption_provider_id": "QINGYI-Normal",
+            "max_base64_mb": 10,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:113",
+        message_id="query_same_provider_skip",
+        message_chain=[Reply(id="r_same", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    req = ProviderRequest(prompt="这个视频在讲什么？")
+
+    with patch.object(plugin, "_extract_frame_data_urls", return_value=[]):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(provider.calls) == 1
+    assert req.contexts == []
+    assert req.prompt == "这个视频在讲什么？"
+
+
 def test_global_llm_metadata_is_used_for_strategy_detection():
     provider = DummyProvider(
         {

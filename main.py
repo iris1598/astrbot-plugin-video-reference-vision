@@ -237,6 +237,11 @@ def _provider_match_text(provider: Any, strategy: str | None) -> str:
     return " ".join(parts).lower()
 
 
+def _provider_id(provider: Any) -> str:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    return str(provider_config.get("id", "") or "").strip()
+
+
 def _provider_allowed(provider: Any, strategy: str | None, config: dict[str, Any]) -> bool:
     provider_text = _provider_match_text(provider, strategy)
     denylist = _normalize_match_values(config.get("provider_denylist"))
@@ -675,7 +680,18 @@ class Main(Star):
                 provider_id,
             )
             return None, None, False
-        return provider, strategy, False
+        current_provider_id = _provider_id(current_provider) if current_provider else ""
+        using_current = bool(
+            current_provider is not None
+            and (
+                provider is current_provider
+                or (
+                    current_provider_id
+                    and current_provider_id == _provider_id(provider)
+                )
+            )
+        )
+        return provider, strategy, using_current
 
     def _find_reply_id(self, event: AstrMessageEvent) -> str:
         msg_obj = getattr(event, "message_obj", None)
