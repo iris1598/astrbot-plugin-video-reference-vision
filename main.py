@@ -35,12 +35,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cache_max_entries": 500,
     "remove_default_video_text": True,
     "allow_direct_video": False,
+    "intercept_direct_video_llm_request": True,
+    "provider_allowlist": [],
+    "provider_denylist": [],
 }
 
 
 def _normalized_message_id(value: Any) -> str:
-    text = str(value or "").strip()
-    return text
+    return str(value or "").strip()
 
 
 def _is_http_url(url: str) -> bool:
@@ -71,9 +73,8 @@ def _coerce_content_blocks(content: Any) -> list[dict]:
         return list(content)
     if isinstance(content, str):
         text = content.strip()
-        if not text:
-            return []
-        return [{"type": "text", "text": text}]
+        if text:
+            return [{"type": "text", "text": text}]
     return []
 
 
@@ -88,7 +89,6 @@ def _get_provider_modalities(provider: Any) -> list[str]:
         inputs = model_metadata.get("modalities", {}).get("input", [])
         if isinstance(inputs, list):
             return [str(x).lower() for x in inputs]
-
     return []
 
 
@@ -101,8 +101,7 @@ def _remove_video_attachment_text_blocks(content_blocks: list[dict]) -> list[dic
         if block.get("type") != "text":
             cleaned.append(block)
             continue
-        text = str(block.get("text", ""))
-        if _is_video_attachment_text(text):
+        if _is_video_attachment_text(str(block.get("text", ""))):
             continue
         cleaned.append(block)
     return cleaned
@@ -146,13 +145,8 @@ def _detect_video_strategy(
         return "generic"
 
     if provider_name in {"openai", "openai_chat_completion"}:
-        if mode == "force":
-            return "generic"
-        return None
-
-    if mode == "force":
-        return "generic"
-    return None
+        return "generic" if mode == "force" else None
+    return "generic" if mode == "force" else None
 
 
 def _guess_mime(path: str) -> str:
@@ -168,11 +162,40 @@ def _file_to_data_url(path: str) -> str:
     return f"data:{mime_type};base64,{payload}"
 
 
-def _is_kimi_strategy_upload(config: dict[str, Any], strategy: str) -> bool:
-    kimi_strategy = str(config.get("kimi_strategy", "auto") or "auto").lower()
-    if strategy != "kimi":
+def _normalize_match_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip().lower()] if value.strip() else []
+    if isinstance(value, list):
+        normalized: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                normalized.append(item.strip().lower())
+        return normalized
+    return []
+
+
+def _provider_match_text(provider: Any, strategy: str | None) -> str:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    parts = [
+        str(provider_config.get("provider", "") or ""),
+        str(provider_config.get("api_base", "") or ""),
+        str(getattr(provider, "get_model", lambda: "")() or ""),
+        str(strategy or ""),
+    ]
+    return " ".join(parts).lower()
+
+
+def _provider_allowed(provider: Any, strategy: str | None, config: dict[str, Any]) -> bool:
+    provider_text = _provider_match_text(provider, strategy)
+    denylist = _normalize_match_values(config.get("provider_denylist"))
+    if any(token in provider_text for token in denylist):
         return False
-    return kimi_strategy in {"upload", "auto"}
+    allowlist = _normalize_match_values(config.get("provider_allowlist"))
+    if allowlist and not any(token in provider_text for token in allowlist):
+        return False
+    return True
 
 
 @dataclass
@@ -277,9 +300,8 @@ class Main(Star):
             return
 
         max_videos = max(1, int(self.config.get("max_videos_per_message", 3)))
-        videos = videos[:max_videos]
-        serialized_videos = []
-        for video in videos:
+        serialized_videos: list[dict[str, str]] = []
+        for video in videos[:max_videos]:
             serialized_videos.append(
                 {
                     "file": str(video.file),
@@ -310,10 +332,6 @@ class Main(Star):
         if not bool(self.config.get("enabled", True)):
             return
 
-        quoted_videos = self._extract_quoted_videos(event, req=req)
-        if not quoted_videos:
-            return
-
         provider = self.context.get_using_provider(getattr(event, "unified_msg_origin", ""))
         if provider is None:
             return
@@ -326,8 +344,23 @@ class Main(Star):
                 self.config.get("prefer_model_metadata_video", True)
             ),
         )
+
+        if self._should_intercept_direct_video_request(event):
+            logger.info("video-reference-vision: intercepted direct video-only request")
+            event.stop_event()
+            return
+
         if strategy is None:
-            logger.debug("video-reference-vision: 跳过处理，未匹配到可用的视频模型策略")
+            logger.debug("video-reference-vision: skip, provider strategy not matched")
+            return
+        if not _provider_allowed(provider, strategy, self.config):
+            logger.info(
+                "video-reference-vision: skip, provider filtered by allow/deny list"
+            )
+            return
+
+        quoted_videos = self._extract_quoted_videos(event, req=req)
+        if not quoted_videos:
             return
 
         video_parts: list[dict] = []
@@ -350,6 +383,26 @@ class Main(Star):
 
         await self._rewrite_request_with_video_parts(req, video_parts)
 
+    def _should_intercept_direct_video_request(self, event: AstrMessageEvent) -> bool:
+        if bool(self.config.get("allow_direct_video", False)):
+            return False
+        if not bool(self.config.get("intercept_direct_video_llm_request", True)):
+            return False
+
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is None:
+            return False
+        message_chain = getattr(msg_obj, "message", None) or []
+        if any(isinstance(comp, Reply) for comp in message_chain):
+            return False
+
+        has_video = any(isinstance(comp, Video) for comp in message_chain)
+        if not has_video:
+            return False
+
+        has_text = bool(str(getattr(event, "message_str", "") or "").strip())
+        return not has_text
+
     def _extract_quoted_videos(
         self,
         event: AstrMessageEvent,
@@ -365,6 +418,7 @@ class Main(Star):
             if isinstance(comp, Reply):
                 reply_comp = comp
                 break
+
         if reply_comp is None:
             if bool(self.config.get("allow_direct_video", False)):
                 return [comp for comp in message_chain if isinstance(comp, Video)]
@@ -378,6 +432,7 @@ class Main(Star):
         reply_id = _normalized_message_id(getattr(reply_comp, "id", ""))
         if not reply_id:
             return []
+
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         cached = self.video_cache.get(session_id=session_id, message_id=reply_id)
         hydrated: list[Video] = []
@@ -419,6 +474,28 @@ class Main(Star):
                 break
         return videos
 
+    def _resolve_kimi_part_mode(
+        self,
+        *,
+        strategy: str,
+        size_bytes: int | None,
+    ) -> str:
+        kimi_strategy = str(self.config.get("kimi_strategy", "auto") or "auto").lower()
+        if strategy != "kimi":
+            return "base64"
+        if kimi_strategy == "upload":
+            return "upload"
+        if kimi_strategy == "base64":
+            return "base64"
+        max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
+        if size_bytes is None:
+            return "base64"
+        if size_bytes > max_size_mb * 1024 * 1024 and bool(
+            self.config.get("kimi_upload_on_oversize", True)
+        ):
+            return "upload"
+        return "base64"
+
     async def _build_video_part(
         self,
         video: Video,
@@ -430,50 +507,41 @@ class Main(Star):
         prefer_public_url = bool(self.config.get("prefer_public_url", True))
 
         local_path: str | None = None
-        video_url: str | None = None
+        size_bytes: int | None = None
         if prefer_public_url and _is_http_url(file_ref):
+            logger.info("video-reference-vision: using public video URL")
             video_url = file_ref
         else:
             local_path = await video.convert_to_file_path()
             if not os.path.exists(local_path):
                 logger.warning(
-                    "video-reference-vision: 本地视频路径不存在：%s", local_path
+                    "video-reference-vision: local video path not found: %s",
+                    local_path,
                 )
                 return None
 
-            max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
             size_bytes = os.path.getsize(local_path)
-            allow_kimi_upload_on_oversize = bool(
-                self.config.get("kimi_upload_on_oversize", True)
-            )
-            if size_bytes > max_size_mb * 1024 * 1024:
-                if (
-                    allow_kimi_upload_on_oversize
-                    and _is_kimi_strategy_upload(self.config, strategy)
-                ):
-                    return await self._build_kimi_upload_video_part(
-                        provider=provider,
-                        local_path=local_path,
-                    )
+            max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
+            if size_bytes > max_size_mb * 1024 * 1024 and strategy != "kimi":
                 logger.warning(
-                    "video-reference-vision: 跳过超限视频（%.2fMB > %dMB）：%s",
+                    "video-reference-vision: skip oversized local video (%.2fMB > %dMB): %s",
                     size_bytes / 1024 / 1024,
                     max_size_mb,
                     local_path,
                 )
                 return None
-            video_url = _file_to_data_url(local_path)
 
-        if _is_kimi_strategy_upload(self.config, strategy):
-            # Kimi upload strategy prefers uploading local files.
-            if local_path and os.path.exists(local_path):
+            if strategy == "kimi" and self._resolve_kimi_part_mode(
+                strategy=strategy, size_bytes=size_bytes
+            ) == "upload":
+                logger.info("video-reference-vision: using Kimi upload mode")
                 return await self._build_kimi_upload_video_part(
                     provider=provider,
                     local_path=local_path,
                 )
 
-        if not video_url:
-            return None
+            logger.info("video-reference-vision: using local video base64 payload")
+            video_url = _file_to_data_url(local_path)
 
         part = {"type": "video_url", "video_url": {"url": video_url}}
         if strategy == "qwen":
@@ -499,20 +567,17 @@ class Main(Star):
             )
             api_key = str(getattr(provider, "get_current_key", lambda: "")() or "")
             if not api_key:
-                logger.warning("video-reference-vision: 缺少 Kimi 上传所需的 API Key")
+                logger.warning("video-reference-vision: missing api key for Kimi upload")
                 return None
             client = AsyncOpenAI(api_key=api_key, base_url=api_base)
             file_obj = await client.files.create(file=Path(local_path), purpose="video")
             file_id = str(getattr(file_obj, "id", "") or "")
             if not file_id:
-                logger.warning("video-reference-vision: Kimi 上传结果缺少 file id")
+                logger.warning("video-reference-vision: Kimi upload returned empty file id")
                 return None
-            return {
-                "type": "video_url",
-                "video_url": {"url": f"ms://{file_id}"},
-            }
+            return {"type": "video_url", "video_url": {"url": f"ms://{file_id}"}}
         except Exception as exc:  # noqa: BLE001
-            logger.warning("video-reference-vision: Kimi 上传失败：%s", exc)
+            logger.warning("video-reference-vision: Kimi upload failed: %s", exc)
             return None
 
     async def _rewrite_request_with_video_parts(

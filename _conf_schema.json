@@ -97,5 +97,20 @@
     "type": "bool",
     "description": "是否允许不引用消息、直接对当前视频做注入",
     "default": false
+  },
+  "intercept_direct_video_llm_request": {
+    "type": "bool",
+    "description": "只发视频且未引用时，是否拦截 AstrBot 默认的 LLM 请求",
+    "default": true
+  },
+  "provider_allowlist": {
+    "type": "list",
+    "description": "可选：只对这些 provider / model 关键字启用，留空表示不限制",
+    "default": []
+  },
+  "provider_denylist": {
+    "type": "list",
+    "description": "可选：对这些 provider / model 关键字禁用",
+    "default": []
   }
 }

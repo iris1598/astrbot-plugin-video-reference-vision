@@ -24,10 +24,8 @@ plugin_module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin_module
 spec.loader.exec_module(plugin_module)
 
-
 VideoMessageCache = plugin_module.VideoMessageCache
 Main = plugin_module.Main
-remove_video_text_blocks = plugin_module._remove_video_attachment_text_blocks
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
 
 
@@ -53,21 +51,33 @@ class DummyContext:
         return self._provider
 
 
-def make_event(
-    *,
-    session_id: str,
-    message_id: str,
-    message_chain: list,
-    sender_id: str = "u1",
-    timestamp: int = 123,
-):
-    msg_obj = SimpleNamespace(
-        message_id=message_id,
-        message=message_chain,
-        sender=SimpleNamespace(user_id=sender_id),
-        timestamp=timestamp,
-    )
-    return SimpleNamespace(unified_msg_origin=session_id, message_obj=msg_obj)
+class DummyEvent:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        message_chain: list,
+        message_str: str = "",
+        sender_id: str = "u1",
+        timestamp: int = 123,
+    ) -> None:
+        self.unified_msg_origin = session_id
+        self.message_str = message_str
+        self.message_obj = SimpleNamespace(
+            message_id=message_id,
+            message=message_chain,
+            sender=SimpleNamespace(user_id=sender_id),
+            timestamp=timestamp,
+        )
+        self.stopped = False
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+
+def make_event(**kwargs) -> DummyEvent:
+    return DummyEvent(**kwargs)
 
 
 def test_video_cache_put_get_and_expire():
@@ -84,19 +94,55 @@ def test_video_cache_put_get_and_expire():
     assert cache.get(session_id="s1", message_id="m1", now_ts=106) is None
 
 
-def test_remove_video_attachment_text_blocks():
-    blocks = [
-        {"type": "text", "text": "[Video Attachment: name a.mp4, path /tmp/a.mp4]"},
-        {"type": "text", "text": "normal text"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
-    ]
-    cleaned = remove_video_text_blocks(blocks)
-    assert len(cleaned) == 2
-    assert cleaned[0]["text"] == "normal text"
+def test_extract_path_from_video_attachment_text_windows_style():
+    text = (
+        "[Video Attachment in quoted message: name demo.mp4, "
+        "path D:\\qq data\\clips\\demo test.mp4]"
+    )
+    assert extract_video_path(text) == r"D:\qq data\clips\demo test.mp4"
 
 
 @pytest.mark.asyncio
-async def test_capture_and_inject_from_reply_chain(tmp_path: Path):
+async def test_direct_video_only_request_is_intercepted(tmp_path: Path):
+    video_file = tmp_path / "direct.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-vl-max",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "allow_direct_video": False,
+            "intercept_direct_video_llm_request": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:100",
+        message_id="msg_direct",
+        message_chain=[Video.fromFileSystem(str(video_file))],
+        message_str="",
+    )
+    req = ProviderRequest(
+        extra_user_content_parts=[
+            TextPart(text=f"[Video Attachment: name direct.mp4, path {video_file}]")
+        ]
+    )
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert event.stopped is True
+    assert req.contexts == []
+
+
+@pytest.mark.asyncio
+async def test_capture_and_inject_from_reply_chain_rewrites_request(tmp_path: Path):
     video_file = tmp_path / "clip.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
@@ -113,12 +159,12 @@ async def test_capture_and_inject_from_reply_chain(tmp_path: Path):
 
     quoted_video = Video.fromFileSystem(str(video_file))
     reply = Reply(id="msg_video_1", chain=[quoted_video])
-    llm_event = make_event(
-        session_id="platform:group:100",
+    event = make_event(
+        session_id="platform:group:101",
         message_id="msg_query_2",
         message_chain=[reply],
+        message_str="请分析这个视频",
     )
-
     req = ProviderRequest(
         prompt="请分析这个视频",
         extra_user_content_parts=[
@@ -128,7 +174,7 @@ async def test_capture_and_inject_from_reply_chain(tmp_path: Path):
         ],
     )
 
-    await plugin.inject_quoted_video(llm_event, req)
+    await plugin.inject_quoted_video(event, req)
 
     assert req.prompt is None
     assert req.image_urls == []
@@ -157,35 +203,65 @@ async def test_inject_from_reply_id_cache_fallback(tmp_path: Path):
     )
     plugin = Main(DummyContext(provider), config={"enabled": True, "mode": "auto"})
 
-    sent_video = Video.fromFileSystem(str(video_file))
     capture_event = make_event(
         session_id="platform:group:200",
         message_id="original_video_msg",
-        message_chain=[sent_video],
+        message_chain=[Video.fromFileSystem(str(video_file))],
     )
     await plugin.capture_video_message(capture_event)
 
-    reply_without_chain = Reply(id="original_video_msg", chain=[])
-    llm_event = make_event(
+    event = make_event(
         session_id="platform:group:200",
         message_id="query_msg",
-        message_chain=[reply_without_chain],
+        message_chain=[Reply(id="original_video_msg", chain=[])],
+        message_str="引用视频后提问",
     )
     req = ProviderRequest(prompt="引用视频后提问")
 
-    await plugin.inject_quoted_video(llm_event, req)
+    await plugin.inject_quoted_video(event, req)
 
     assert len(req.contexts) == 1
-    content = req.contexts[0]["content"]
-    assert any(part.get("type") == "video_url" for part in content)
+    assert any(part.get("type") == "video_url" for part in req.contexts[0]["content"])
 
 
 @pytest.mark.asyncio
-async def test_kimi_upload_strategy_injects_ms_url(tmp_path: Path):
-    video_file = tmp_path / "kimi.mp4"
+async def test_provider_allowlist_blocks_non_matching_provider(tmp_path: Path):
+    video_file = tmp_path / "clip3.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
-    quoted_video = Video.fromFileSystem(str(video_file))
-    reply = Reply(id="k1", chain=[quoted_video])
+
+    provider = DummyProvider(
+        {
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-vl-max",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "provider_allowlist": ["kimi"],
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:300",
+        message_id="query_1",
+        message_chain=[Reply(id="r1", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="test",
+    )
+    req = ProviderRequest(prompt="test")
+
+    await plugin.inject_quoted_video(event, req)
+
+    assert req.contexts == []
+    assert req.prompt == "test"
+
+
+@pytest.mark.asyncio
+async def test_kimi_auto_uses_base64_for_small_local_video(tmp_path: Path):
+    video_file = tmp_path / "kimi_small.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     provider = DummyProvider(
         {
@@ -196,25 +272,78 @@ async def test_kimi_upload_strategy_injects_ms_url(tmp_path: Path):
     )
     plugin = Main(
         DummyContext(provider),
-        config={"enabled": True, "mode": "auto", "kimi_strategy": "upload"},
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "auto",
+            "max_base64_mb": 10,
+        },
     )
+
     event = make_event(
         session_id="platform:group:400",
         message_id="query_2",
-        message_chain=[reply],
+        message_chain=[Reply(id="k1", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="read this video",
+    )
+    req = ProviderRequest(prompt="read this video")
+
+    class FailAsyncOpenAI:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("small local Kimi video should not upload in auto mode")
+
+    with patch("openai.AsyncOpenAI", FailAsyncOpenAI):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(req.contexts) == 1
+    content = req.contexts[0]["content"]
+    assert any(
+        part.get("type") == "video_url"
+        and str(part.get("video_url", {}).get("url", "")).startswith("data:video/")
+        for part in content
+    )
+
+
+@pytest.mark.asyncio
+async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
+    video_file = tmp_path / "kimi_big.mp4"
+    video_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+    provider = DummyProvider(
+        {
+            "api_base": "https://api.moonshot.cn/v1",
+            "model": "kimi-k2.5",
+            "key": "k_test_key",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "kimi_strategy": "auto",
+            "max_base64_mb": 1,
+            "kimi_upload_on_oversize": True,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:401",
+        message_id="query_3",
+        message_chain=[Reply(id="k2", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="read this video",
     )
     req = ProviderRequest(prompt="read this video")
 
     class FakeFiles:
         async def create(self, file, purpose):
             assert purpose == "video"
-            assert str(file).endswith("kimi.mp4")
-            return SimpleNamespace(id="file_test_123")
+            return SimpleNamespace(id="file_test_oversize")
 
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url):
-            assert base_url.startswith("https://api.moonshot.cn")
             assert api_key == "k_test_key"
+            assert base_url.startswith("https://api.moonshot.cn")
             self.files = FakeFiles()
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
@@ -227,13 +356,3 @@ async def test_kimi_upload_strategy_injects_ms_url(tmp_path: Path):
         and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
         for part in content
     )
-
-
-def test_extract_path_from_video_attachment_text_windows_style():
-    text = (
-        "[Video Attachment in quoted message: name demo.mp4, "
-        "path D:\\qq data\\clips\\demo test.mp4]"
-    )
-    path = extract_video_path(text)
-    assert path == r"D:\qq data\clips\demo test.mp4"
-
