@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from pydantic import BaseModel
+
 from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.message import ContentPart
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 
@@ -56,6 +59,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 SupportedMedia = Video | Image
+
+
+class VideoURLPart(ContentPart):
+    class VideoURL(BaseModel):
+        url: str
+        id: str | None = None
+
+    type: str = "video_url"
+    video_url: VideoURL
+    fps: float | None = None
 
 
 def _normalized_message_id(value: Any) -> str:
@@ -1044,7 +1057,17 @@ class Main(Star):
         blocks = _coerce_content_blocks(user_message.get("content"))
         if bool(self.config.get("remove_default_video_text", True)):
             blocks = _remove_video_attachment_text_blocks(blocks)
-        blocks.extend(video_parts)
+        normalized_parts: list[dict] = []
+        for part in video_parts:
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "video_url"
+                and isinstance(part.get("video_url"), dict)
+            ):
+                normalized_parts.append(VideoURLPart.model_validate(part).model_dump())
+            else:
+                normalized_parts.append(part)
+        blocks.extend(normalized_parts)
         if not blocks:
             blocks = [{"type": "text", "text": "[视频]"}]
         user_message["content"] = blocks
