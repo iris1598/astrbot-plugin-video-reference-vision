@@ -29,6 +29,7 @@ DEFAULT_VIDEO_CAPTION_PROMPT = (
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "mode": "auto",  # auto | force | off
+    "enable_onebot_media_resolver": True,
     "prefer_public_url": True,
     "max_base64_mb": 20,
     "fallback_behavior": "keep_text",  # keep_text | silent
@@ -261,10 +262,53 @@ def _media_mime_hint(media: SupportedMedia) -> str | None:
     return None
 
 
+def _is_usable_media_ref(ref: str) -> bool:
+    normalized = str(ref or "").strip()
+    if not normalized:
+        return False
+    if normalized.startswith(("http://", "https://", "file:///", "base64://")):
+        return True
+    return os.path.exists(_normalize_local_file_path(normalized))
+
+
 def _normalize_local_file_path(value: str) -> str:
     if value.startswith("file:///"):
         return value[8:]
     return value
+
+
+def _extract_segments_from_onebot_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            payload = data
+    segments = []
+    if isinstance(payload, dict):
+        segments = payload.get("message") or payload.get("messages") or []
+    if not isinstance(segments, list):
+        return []
+    return [segment for segment in segments if isinstance(segment, dict)]
+
+
+def _extract_onebot_video_entries(payload: Any) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for segment in _extract_segments_from_onebot_payload(payload):
+        if segment.get("type") != "video":
+            continue
+        data = segment.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        entries.append(
+            {
+                "kind": "video",
+                "file": str(data.get("file") or ""),
+                "url": str(data.get("url") or ""),
+                "path": str(data.get("path") or ""),
+                "cover": str(data.get("cover") or ""),
+                "file_id": str(data.get("file_id") or ""),
+            }
+        )
+    return entries
 
 
 def _extract_supported_media_from_chain(
@@ -385,6 +429,26 @@ class Main(Star):
         serialized_videos: list[dict[str, str]] = []
         for item in media[:max_videos]:
             serialized_videos.append(self._serialize_media(item))
+        seen_refs = {
+            f"{entry.get('file', '')}|{entry.get('url', '')}|{entry.get('path', '')}"
+            for entry in serialized_videos
+        }
+        for entry in _extract_onebot_video_entries(getattr(msg_obj, "raw_message", None)):
+            if len(serialized_videos) >= max_videos:
+                break
+            dedupe_key = (
+                f"{entry.get('file', '')}|{entry.get('url', '')}|{entry.get('path', '')}"
+            )
+            if dedupe_key in seen_refs:
+                continue
+            ref = entry.get("url") or entry.get("file") or entry.get("path")
+            if not ref:
+                continue
+            serialized_videos.append(entry)
+            seen_refs.add(dedupe_key)
+
+        if not serialized_videos:
+            return
 
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         message_id = _normalized_message_id(getattr(msg_obj, "message_id", ""))
@@ -438,7 +502,13 @@ class Main(Star):
             event.stop_event()
             return
 
+        reply_id = self._find_reply_id(event)
         quoted_media = self._extract_quoted_media(event, req=req)
+        quoted_media = await self._resolve_unusable_media_with_onebot(
+            event,
+            quoted_media,
+            reply_id,
+        )
         if not quoted_media:
             return
 
@@ -531,6 +601,137 @@ class Main(Star):
             )
             return None, None
         return provider, strategy
+
+    def _find_reply_id(self, event: AstrMessageEvent) -> str:
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is None:
+            return ""
+        for comp in list(getattr(msg_obj, "message", None) or []):
+            if isinstance(comp, Reply):
+                return _normalized_message_id(getattr(comp, "id", ""))
+        return ""
+
+    async def _resolve_onebot_video_entry(
+        self,
+        event: AstrMessageEvent,
+        entry: dict[str, str],
+    ) -> SupportedMedia | None:
+        for key in ("url", "path"):
+            ref = str(entry.get(key) or "").strip()
+            if _is_usable_media_ref(ref):
+                local_path = (
+                    os.path.abspath(_normalize_local_file_path(ref))
+                    if os.path.exists(_normalize_local_file_path(ref))
+                    else ""
+                )
+                return Video(
+                    file=ref,
+                    cover=str(entry.get("cover") or ""),
+                    path=local_path,
+                )
+
+        file_ref = str(entry.get("file") or entry.get("file_id") or "").strip()
+        if not file_ref:
+            return None
+
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+
+        try:
+            result = await bot.call_action("get_file", file=file_ref)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "video-reference-vision: OneBot get_file failed for %s: %s",
+                file_ref,
+                exc,
+            )
+            return None
+
+        if not isinstance(result, dict):
+            return None
+
+        resolved_ref = (
+            str(result.get("url") or "").strip()
+            or str(result.get("file") or "").strip()
+            or str(result.get("path") or "").strip()
+        )
+        if not resolved_ref:
+            return None
+
+        local_path = ""
+        normalized = _normalize_local_file_path(resolved_ref)
+        if os.path.exists(normalized):
+            local_path = os.path.abspath(normalized)
+
+        return Video(
+            file=resolved_ref,
+            cover=str(entry.get("cover") or ""),
+            path=local_path,
+        )
+
+    async def _resolve_quoted_media_from_onebot_get_msg(
+        self,
+        event: AstrMessageEvent,
+        reply_id: str,
+    ) -> list[SupportedMedia]:
+        if not bool(self.config.get("enable_onebot_media_resolver", True)):
+            return []
+
+        bot = getattr(event, "bot", None)
+        if bot is None or not reply_id:
+            return []
+
+        try:
+            payload = await bot.call_action("get_msg", message_id=int(reply_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "video-reference-vision: OneBot get_msg failed for reply_id=%s: %s",
+                reply_id,
+                exc,
+            )
+            return []
+
+        media: list[SupportedMedia] = []
+        for entry in _extract_onebot_video_entries(payload):
+            resolved = await self._resolve_onebot_video_entry(event, entry)
+            if resolved:
+                media.append(resolved)
+
+        if media:
+            logger.info(
+                "video-reference-vision: resolved %d quoted video(s) via OneBot get_msg/get_file",
+                len(media),
+            )
+        return media
+
+    async def _resolve_unusable_media_with_onebot(
+        self,
+        event: AstrMessageEvent,
+        media: list[SupportedMedia],
+        reply_id: str,
+    ) -> list[SupportedMedia]:
+        usable_media: list[SupportedMedia] = []
+        has_unusable = False
+
+        for item in media:
+            ref = _media_file_ref(item)
+            if _is_usable_media_ref(ref):
+                usable_media.append(item)
+            else:
+                has_unusable = True
+
+        if media and not has_unusable:
+            return usable_media
+
+        onebot_media = await self._resolve_quoted_media_from_onebot_get_msg(
+            event,
+            reply_id,
+        )
+        if onebot_media:
+            return onebot_media
+
+        return media
 
     async def _resolve_media_local_path(self, media: SupportedMedia) -> str:
         file_ref = _media_file_ref(media).strip()
@@ -659,12 +860,15 @@ class Main(Star):
                 "file": str(media.file or ""),
                 "url": str(media.url or ""),
                 "path": str(media.path or ""),
-            }
+        }
+        file_ref = str(media.file or "")
         return {
             "kind": "video",
-            "file": str(media.file),
+            "file": file_ref,
+            "url": file_ref if _is_http_url(file_ref) else "",
             "cover": str(media.cover or ""),
             "path": str(media.path or ""),
+            "file_id": "",
         }
 
     def _hydrate_media(self, entry: dict[str, str]) -> SupportedMedia | None:
@@ -678,7 +882,7 @@ class Main(Star):
                 return None
             return Image(file=ref, url=url_ref, path=path_ref)
 
-        ref = file_ref or path_ref
+        ref = url_ref or file_ref or path_ref
         if not ref:
             return None
         return Video(

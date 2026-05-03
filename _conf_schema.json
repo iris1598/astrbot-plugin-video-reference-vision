@@ -16,6 +16,12 @@
       "off"
     ]
   },
+  "enable_onebot_media_resolver": {
+    "type": "bool",
+    "description": "启用 OneBot 视频回查",
+    "hint": "引用视频只有资源 ID 或文件名时，尝试通过 OneBot/NapCat 的 `get_msg` 和 `get_file` 回查真实视频地址。",
+    "default": true
+  },
   "prefer_public_url": {
     "type": "bool",
     "description": "公网链接优先直传",
