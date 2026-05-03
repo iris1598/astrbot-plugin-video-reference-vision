@@ -16,7 +16,7 @@
   },
   "prefer_public_url": {
     "type": "bool",
-    "description": "如果视频本身就是公网链接，优先直接使用链接而不是转 base64",
+    "description": "如果视频或 GIF 本身就是公网链接，优先直接使用链接而不是转 base64",
     "default": true
   },
   "prefer_model_metadata_video": {
@@ -35,7 +35,7 @@
   },
   "max_base64_mb": {
     "type": "int",
-    "description": "本地视频允许转成 base64 的最大大小（MB）",
+    "description": "本地视频或 GIF 允许转成 base64 的最大大小（MB）",
     "default": 20
   },
   "qwen_fps": {
@@ -60,7 +60,7 @@
   },
   "kimi_upload_on_oversize": {
     "type": "bool",
-    "description": "视频超过 base64 大小限制时，是否尝试走 Kimi 上传模式",
+    "description": "视频或 GIF 超过 base64 大小限制时，是否尝试走 Kimi 上传模式",
     "default": true
   },
   "kimi_api_base": {
@@ -70,22 +70,22 @@
   },
   "max_videos_per_message": {
     "type": "int",
-    "description": "每条消息最多缓存多少个视频",
+    "description": "每条消息最多缓存多少个视频或 GIF",
     "default": 3
   },
   "max_videos_per_request": {
     "type": "int",
-    "description": "每次提问最多注入多少个被引用视频",
+    "description": "每次提问最多注入多少个被引用视频或 GIF",
     "default": 1
   },
   "cache_ttl_seconds": {
     "type": "int",
-    "description": "视频缓存保留时长（秒）",
+    "description": "视频和 GIF 缓存保留时长（秒）",
     "default": 7200
   },
   "cache_max_entries": {
     "type": "int",
-    "description": "全局最多缓存多少条视频消息",
+    "description": "全局最多缓存多少条视频或 GIF 消息",
     "default": 500
   },
   "remove_default_video_text": {
@@ -95,37 +95,42 @@
   },
   "allow_direct_video": {
     "type": "bool",
-    "description": "是否允许不引用消息，直接对当前视频做注入",
+    "description": "是否允许不引用消息，直接对当前视频或 GIF 做注入",
     "default": false
   },
   "intercept_direct_video_llm_request": {
     "type": "bool",
-    "description": "未引用视频时，是否拦截 AstrBot 默认的 LLM 请求（包括纯视频和视频加文字）",
+    "description": "未引用视频或 GIF 时，是否拦截 AstrBot 默认的 LLM 请求（包括纯视频/GIF 和视频/GIF 加文字）",
     "default": true
   },
   "provider_allowlist": {
     "type": "list",
-    "description": "可选：只对这些 provider / model 关键字启用，留空表示不限制",
+    "description": "可选：只对这些 provider / model 关键字启用，留空表示不限制。会同时作用于当前聊天模型和视频转述模型",
     "default": []
   },
   "provider_denylist": {
     "type": "list",
-    "description": "可选：对这些 provider / model 关键字禁用",
+    "description": "可选：对这些 provider / model 关键字禁用。会同时作用于当前聊天模型和视频转述模型",
     "default": []
   },
   "video_caption_provider_id": {
     "type": "string",
-    "description": "可选：指定一个独立的视频转述模型 Provider ID。留空时默认使用当前聊天模型",
+    "description": "可选：指定一个独立的视频转述模型 Provider ID。留空表示不启用转述模式，直接按原逻辑注入 video_url",
     "default": ""
   },
   "video_caption_prompt": {
     "type": "string",
     "description": "视频转述提示词。会直接显示在插件设置里，支持按你的业务改写",
-    "default": "请阅读这个视频，并用中文转述与用户问题直接相关的内容。如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。不要编造视频中没有出现的信息。"
+    "default": "请阅读这个视频或 GIF，并用中文转述与用户问题直接相关的内容。如果用户没有提出具体问题，就概括主要内容、关键画面、对白或字幕，以及事件顺序。不要编造没有出现的信息。"
   },
   "video_caption_use_current_question": {
     "type": "bool",
     "description": "调用视频转述模型时，是否把用户当前问题一并带入提示词",
     "default": true
+  },
+  "enable_gif_input": {
+    "type": "bool",
+    "description": "是否把被引用的 GIF 当作视频输入处理，用于读取完整动图而不是只看第一帧",
+    "default": false
   }
 }

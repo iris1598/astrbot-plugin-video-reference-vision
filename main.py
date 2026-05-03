@@ -9,13 +9,21 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Reply, Video
+from astrbot.api.message_components import Image, Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
+
+
+DEFAULT_VIDEO_CAPTION_PROMPT = (
+    "请阅读这个视频，并用中文转述与用户问题直接相关的内容。"
+    "如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
+    "不要编造视频中没有出现的信息。"
+)
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -40,13 +48,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider_allowlist": [],
     "provider_denylist": [],
     "video_caption_provider_id": "",
-    "video_caption_prompt": (
-        "请阅读这个视频，并用中文转述与用户问题直接相关的内容。"
-        "如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
-        "不要编造视频中没有出现的信息。"
-    ),
+    "video_caption_prompt": DEFAULT_VIDEO_CAPTION_PROMPT,
     "video_caption_use_current_question": True,
+    "enable_gif_input": False,
 }
+
+
+SupportedMedia = Video | Image
 
 
 def _normalized_message_id(value: Any) -> str:
@@ -167,7 +175,7 @@ def _detect_video_strategy(
 
 def _guess_mime(path: str) -> str:
     mime_type = mimetypes.guess_type(path)[0]
-    if mime_type and mime_type.startswith("video/"):
+    if mime_type and (mime_type.startswith("video/") or mime_type == "image/gif"):
         return mime_type
     return "video/mp4"
 
@@ -213,6 +221,47 @@ def _provider_allowed(provider: Any, strategy: str | None, config: dict[str, Any
     if allowlist and not any(token in provider_text for token in allowlist):
         return False
     return True
+
+
+def _media_file_ref(media: SupportedMedia) -> str:
+    if isinstance(media, Image):
+        return str(media.url or media.file or "")
+    return str(media.file or "")
+
+
+def _path_without_query(value: str) -> str:
+    if _is_http_url(value):
+        return urlparse(value).path
+    if value.startswith("file:///"):
+        value = value[8:]
+    return value
+
+
+def _is_gif_ref(value: str) -> bool:
+    if value.startswith("base64://"):
+        return False
+    return _path_without_query(value).lower().endswith(".gif")
+
+
+def _is_supported_gif(component: Any, config: dict[str, Any]) -> bool:
+    if not bool(config.get("enable_gif_input", False)):
+        return False
+    if not isinstance(component, Image):
+        return False
+    return _is_gif_ref(_media_file_ref(component))
+
+
+def _extract_supported_media_from_chain(
+    message_chain: list[Any],
+    config: dict[str, Any],
+) -> list[SupportedMedia]:
+    media: list[SupportedMedia] = []
+    for component in message_chain:
+        if isinstance(component, Video):
+            media.append(component)
+        elif _is_supported_gif(component, config):
+            media.append(component)
+    return media
 
 
 @dataclass
@@ -309,24 +358,17 @@ class Main(Star):
         if msg_obj is None:
             return
 
-        videos = [
-            comp
-            for comp in (getattr(msg_obj, "message", None) or [])
-            if isinstance(comp, Video)
-        ]
-        if not videos:
+        media = _extract_supported_media_from_chain(
+            list(getattr(msg_obj, "message", None) or []),
+            self.config,
+        )
+        if not media:
             return
 
         max_videos = max(1, int(self.config.get("max_videos_per_message", 3)))
         serialized_videos: list[dict[str, str]] = []
-        for video in videos[:max_videos]:
-            serialized_videos.append(
-                {
-                    "file": str(video.file),
-                    "cover": str(video.cover or ""),
-                    "path": str(video.path or ""),
-                }
-            )
+        for item in media[:max_videos]:
+            serialized_videos.append(self._serialize_media(item))
 
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         message_id = _normalized_message_id(getattr(msg_obj, "message_id", ""))
@@ -380,17 +422,17 @@ class Main(Star):
             event.stop_event()
             return
 
-        quoted_videos = self._extract_quoted_videos(event, req=req)
-        if not quoted_videos:
+        quoted_media = self._extract_quoted_media(event, req=req)
+        if not quoted_media:
             return
 
         max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
-        quoted_videos = quoted_videos[:max_videos]
+        quoted_media = quoted_media[:max_videos]
 
         caption_provider, caption_strategy = self._resolve_video_caption_provider(mode=mode)
         if caption_provider and caption_strategy:
-            summary_text = await self._summarize_videos_with_provider(
-                videos=quoted_videos,
+            summary_text = await self._summarize_media_with_provider(
+                media=quoted_media,
                 provider=caption_provider,
                 strategy=caption_strategy,
                 user_question=self._extract_user_question(event, req),
@@ -398,20 +440,19 @@ class Main(Star):
             if summary_text:
                 await self._rewrite_request_with_caption_text(req, summary_text)
                 return
+
+        if current_strategy is None:
             if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
                 req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
                     list(req.extra_user_content_parts or [])
                 )
-                return
-
-        if current_strategy is None:
             logger.debug("video-reference-vision: skip, provider strategy not matched")
             return
 
         video_parts: list[dict] = []
-        for video in quoted_videos:
+        for item in quoted_media:
             part = await self._build_video_part(
-                video,
+                item,
                 strategy=current_strategy,
                 provider=current_provider,
             )
@@ -436,10 +477,10 @@ class Main(Star):
         msg_obj = getattr(event, "message_obj", None)
         if msg_obj is None:
             return False
-        message_chain = getattr(msg_obj, "message", None) or []
+        message_chain = list(getattr(msg_obj, "message", None) or [])
         if any(isinstance(comp, Reply) for comp in message_chain):
             return False
-        return any(isinstance(comp, Video) for comp in message_chain)
+        return bool(_extract_supported_media_from_chain(message_chain, self.config))
 
     def _resolve_video_caption_provider(self, *, mode: str) -> tuple[Any | None, str | None]:
         provider_id = str(self.config.get("video_caption_provider_id", "") or "").strip()
@@ -484,25 +525,23 @@ class Main(Star):
     def _build_video_caption_prompt(self, user_question: str) -> str:
         prompt_text = str(self.config.get("video_caption_prompt", "") or "").strip()
         if not prompt_text:
-            prompt_text = (
-                "请用中文概括这个视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
-            )
+            prompt_text = DEFAULT_VIDEO_CAPTION_PROMPT
         if bool(self.config.get("video_caption_use_current_question", True)) and user_question:
             prompt_text = f"{prompt_text}\n\n用户当前问题：{user_question}"
         return prompt_text
 
-    async def _summarize_videos_with_provider(
+    async def _summarize_media_with_provider(
         self,
         *,
-        videos: list[Video],
+        media: list[SupportedMedia],
         provider: Any,
         strategy: str,
         user_question: str,
     ) -> str | None:
         video_parts: list[dict] = []
-        for video in videos:
+        for item in media:
             part = await self._build_video_part(
-                video,
+                item,
                 strategy=strategy,
                 provider=provider,
             )
@@ -511,11 +550,13 @@ class Main(Star):
         if not video_parts:
             return None
 
-        prompt_text = self._build_video_caption_prompt(user_question)
         contexts = [
             {
                 "role": "user",
-                "content": [{"type": "text", "text": prompt_text}, *video_parts],
+                "content": [
+                    {"type": "text", "text": self._build_video_caption_prompt(user_question)},
+                    *video_parts,
+                ],
             }
         ]
         try:
@@ -530,17 +571,17 @@ class Main(Star):
             return None
         return summary
 
-    def _extract_quoted_videos(
+    def _extract_quoted_media(
         self,
         event: AstrMessageEvent,
         *,
         req: ProviderRequest | None = None,
-    ) -> list[Video]:
+    ) -> list[SupportedMedia]:
         msg_obj = getattr(event, "message_obj", None)
         if msg_obj is None:
             return []
 
-        message_chain = getattr(msg_obj, "message", None) or []
+        message_chain = list(getattr(msg_obj, "message", None) or [])
         reply_comp: Reply | None = None
         for comp in message_chain:
             if isinstance(comp, Reply):
@@ -549,13 +590,13 @@ class Main(Star):
 
         if reply_comp is None:
             if bool(self.config.get("allow_direct_video", False)):
-                return [comp for comp in message_chain if isinstance(comp, Video)]
+                return _extract_supported_media_from_chain(message_chain, self.config)
             return []
 
         if reply_comp.chain:
-            videos = [comp for comp in reply_comp.chain if isinstance(comp, Video)]
-            if videos:
-                return videos
+            media = _extract_supported_media_from_chain(list(reply_comp.chain), self.config)
+            if media:
+                return media
 
         reply_id = _normalized_message_id(getattr(reply_comp, "id", ""))
         if not reply_id:
@@ -563,32 +604,58 @@ class Main(Star):
 
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         cached = self.video_cache.get(session_id=session_id, message_id=reply_id)
-        hydrated: list[Video] = []
+        hydrated: list[SupportedMedia] = []
         if cached:
-            for video_entry in cached.videos:
-                file_ref = str(video_entry.get("file", "") or "")
-                path_ref = str(video_entry.get("path", "") or "")
-                ref = file_ref or path_ref
-                if not ref:
-                    continue
-                hydrated.append(
-                    Video(
-                        file=ref,
-                        cover=str(video_entry.get("cover", "") or ""),
-                        path=path_ref,
-                    )
-                )
+            for entry in cached.videos:
+                media = self._hydrate_media(entry)
+                if media:
+                    hydrated.append(media)
         if hydrated:
             return hydrated
         if req is not None:
             return self._extract_videos_from_request_attachment_text(req)
         return []
 
+    def _serialize_media(self, media: SupportedMedia) -> dict[str, str]:
+        if isinstance(media, Image):
+            return {
+                "kind": "gif",
+                "file": str(media.file or ""),
+                "url": str(media.url or ""),
+                "path": str(media.path or ""),
+            }
+        return {
+            "kind": "video",
+            "file": str(media.file),
+            "cover": str(media.cover or ""),
+            "path": str(media.path or ""),
+        }
+
+    def _hydrate_media(self, entry: dict[str, str]) -> SupportedMedia | None:
+        kind = str(entry.get("kind", "video") or "video")
+        file_ref = str(entry.get("file", "") or "")
+        path_ref = str(entry.get("path", "") or "")
+        url_ref = str(entry.get("url", "") or "")
+        if kind == "gif":
+            ref = url_ref or file_ref or path_ref
+            if not ref:
+                return None
+            return Image(file=ref, url=url_ref, path=path_ref)
+
+        ref = file_ref or path_ref
+        if not ref:
+            return None
+        return Video(
+            file=ref,
+            cover=str(entry.get("cover", "") or ""),
+            path=path_ref,
+        )
+
     def _extract_videos_from_request_attachment_text(
         self,
         req: ProviderRequest,
-    ) -> list[Video]:
-        videos: list[Video] = []
+    ) -> list[SupportedMedia]:
+        videos: list[SupportedMedia] = []
         max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
         for part in list(req.extra_user_content_parts or []):
             text = getattr(part, "text", None)
@@ -626,20 +693,20 @@ class Main(Star):
 
     async def _build_video_part(
         self,
-        video: Video,
+        media: SupportedMedia,
         *,
         strategy: str,
         provider: Any,
     ) -> dict | None:
-        file_ref = str(video.file or "")
+        file_ref = _media_file_ref(media)
         prefer_public_url = bool(self.config.get("prefer_public_url", True))
         kimi_part_mode = self._resolve_kimi_part_mode(strategy=strategy, size_bytes=None)
 
         if strategy == "kimi" and kimi_part_mode == "upload":
-            local_path = await video.convert_to_file_path()
+            local_path = await media.convert_to_file_path()
             if not os.path.exists(local_path):
                 logger.warning(
-                    "video-reference-vision: local video path not found: %s",
+                    "video-reference-vision: local media path not found: %s",
                     local_path,
                 )
                 return None
@@ -650,13 +717,13 @@ class Main(Star):
             )
 
         if prefer_public_url and _is_http_url(file_ref):
-            logger.info("video-reference-vision: using public video URL")
+            logger.info("video-reference-vision: using public media URL")
             video_url = file_ref
         else:
-            local_path = await video.convert_to_file_path()
+            local_path = await media.convert_to_file_path()
             if not os.path.exists(local_path):
                 logger.warning(
-                    "video-reference-vision: local video path not found: %s",
+                    "video-reference-vision: local media path not found: %s",
                     local_path,
                 )
                 return None
@@ -665,7 +732,7 @@ class Main(Star):
             max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
             if size_bytes > max_size_mb * 1024 * 1024 and strategy != "kimi":
                 logger.warning(
-                    "video-reference-vision: skip oversized local video (%.2fMB > %dMB): %s",
+                    "video-reference-vision: skip oversized local media (%.2fMB > %dMB): %s",
                     size_bytes / 1024 / 1024,
                     max_size_mb,
                     local_path,
@@ -682,7 +749,7 @@ class Main(Star):
                     local_path=local_path,
                 )
 
-            logger.info("video-reference-vision: using local video base64 payload")
+            logger.info("video-reference-vision: using local media base64 payload")
             video_url = _file_to_data_url(local_path)
 
         part = {"type": "video_url", "video_url": {"url": video_url}}
