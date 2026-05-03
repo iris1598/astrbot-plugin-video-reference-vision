@@ -20,9 +20,9 @@ from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 
 DEFAULT_VIDEO_CAPTION_PROMPT = (
-    "请阅读这个视频，并用中文转述与用户问题直接相关的内容。"
-    "如果用户没有提出具体问题，就概括视频的主要内容、关键画面、对白或字幕，以及事件顺序。"
-    "不要编造视频中没有出现的信息。"
+    "请阅读这个视频或 GIF，并用中文转述与用户问题直接相关的内容。"
+    "如果用户没有提出具体问题，就概括主要内容、关键画面、对白或字幕，以及事件顺序。"
+    "不要编造没有出现的信息。"
 )
 
 
@@ -180,8 +180,8 @@ def _guess_mime(path: str) -> str:
     return "video/mp4"
 
 
-def _file_to_data_url(path: str) -> str:
-    mime_type = _guess_mime(path)
+def _file_to_data_url(path: str, *, mime_hint: str | None = None) -> str:
+    mime_type = mime_hint or _guess_mime(path)
     payload = base64.b64encode(Path(path).read_bytes()).decode("utf-8")
     return f"data:{mime_type};base64,{payload}"
 
@@ -249,6 +249,16 @@ def _is_supported_gif(component: Any, config: dict[str, Any]) -> bool:
     if not isinstance(component, Image):
         return False
     return _is_gif_ref(_media_file_ref(component))
+
+
+def _is_gif_media(media: SupportedMedia) -> bool:
+    return isinstance(media, Image) and _is_gif_ref(_media_file_ref(media))
+
+
+def _media_mime_hint(media: SupportedMedia) -> str | None:
+    if _is_gif_media(media):
+        return "image/gif"
+    return None
 
 
 def _extract_supported_media_from_chain(
@@ -701,8 +711,10 @@ class Main(Star):
         file_ref = _media_file_ref(media)
         prefer_public_url = bool(self.config.get("prefer_public_url", True))
         kimi_part_mode = self._resolve_kimi_part_mode(strategy=strategy, size_bytes=None)
+        mime_hint = _media_mime_hint(media)
+        allow_kimi_upload = not _is_gif_media(media)
 
-        if strategy == "kimi" and kimi_part_mode == "upload":
+        if strategy == "kimi" and kimi_part_mode == "upload" and allow_kimi_upload:
             local_path = await media.convert_to_file_path()
             if not os.path.exists(local_path):
                 logger.warning(
@@ -730,7 +742,9 @@ class Main(Star):
 
             size_bytes = os.path.getsize(local_path)
             max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
-            if size_bytes > max_size_mb * 1024 * 1024 and strategy != "kimi":
+            if size_bytes > max_size_mb * 1024 * 1024 and (
+                strategy != "kimi" or not allow_kimi_upload
+            ):
                 logger.warning(
                     "video-reference-vision: skip oversized local media (%.2fMB > %dMB): %s",
                     size_bytes / 1024 / 1024,
@@ -739,7 +753,7 @@ class Main(Star):
                 )
                 return None
 
-            if strategy == "kimi" and self._resolve_kimi_part_mode(
+            if strategy == "kimi" and allow_kimi_upload and self._resolve_kimi_part_mode(
                 strategy=strategy,
                 size_bytes=size_bytes,
             ) == "upload":
@@ -750,7 +764,7 @@ class Main(Star):
                 )
 
             logger.info("video-reference-vision: using local media base64 payload")
-            video_url = _file_to_data_url(local_path)
+            video_url = _file_to_data_url(local_path, mime_hint=mime_hint)
 
         part = {"type": "video_url", "video_url": {"url": video_url}}
         if strategy == "qwen":
