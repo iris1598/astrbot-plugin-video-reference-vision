@@ -144,7 +144,7 @@
     "description": "视频转述模型",
     "default": "",
     "_special": "select_provider",
-    "hint": "可选单独指定一个视频转述模型。留空则直接把 `video_url` 注入当前聊天模型。"
+    "hint": "可选单独指定一个视频转述模型。留空时会优先用当前聊天模型做转述；只有转述失败且允许回退时，才继续尝试原生 `video_url` 注入。"
   },
   "video_caption_prompt": {
     "type": "text",
@@ -156,6 +156,30 @@
     "type": "bool",
     "description": "转述时带上当前问题",
     "hint": "调用视频转述模型时，把用户当前这句提问一起带进去，让转述更贴近问题本身。",
+    "default": true
+  },
+  "video_caption_use_current_provider": {
+    "type": "bool",
+    "description": "留空时先用当前模型转述",
+    "hint": "未单独指定视频转述模型时，先让当前聊天模型尝试直接读视频或读取抽帧结果；成功后只把转述文本喂回主对话。",
+    "default": true
+  },
+  "video_caption_frame_fallback": {
+    "type": "bool",
+    "description": "转述失败时抽帧兜底",
+    "hint": "视频原生输入被网关拒绝时，尝试用 ffmpeg 抽取关键帧并按图片发送给转述模型。适合只支持图像、不支持视频的模型。",
+    "default": true
+  },
+  "video_caption_frame_count": {
+    "type": "int",
+    "description": "抽帧数量",
+    "hint": "抽帧兜底时最多发送多少张关键帧。数量越多越完整，但请求也会更重。",
+    "default": 4
+  },
+  "native_video_injection_fallback": {
+    "type": "bool",
+    "description": "允许回退原生视频注入",
+    "hint": "当转述链路失败后，是否继续把 `video_url` 注入当前聊天模型。关闭后会停在文本/附件回退，不再硬塞视频给不稳定的网关。",
     "default": true
   },
   "enable_gif_input": {

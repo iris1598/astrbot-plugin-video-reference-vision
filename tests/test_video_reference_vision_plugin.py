@@ -607,6 +607,105 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
     assert not any(part.get("type") == "video_url" for part in rewritten)
 
 
+@pytest.mark.asyncio
+async def test_current_provider_falls_back_to_frame_caption_when_video_is_rejected(tmp_path: Path):
+    video_file = tmp_path / "frames.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "chat_kimi", "api_base": "https://api.moonshot.cn/v1", "model": "kimi-k2.5"}
+    )
+
+    async def fake_text_chat(**kwargs):
+        provider.calls.append(kwargs)
+        content = kwargs["contexts"][0]["content"]
+        if any(part.get("type") == "video_url" for part in content):
+            raise RuntimeError("No endpoints found that support input video")
+        assert any(part.get("type") == "image_url" for part in content)
+        return SimpleNamespace(completion_text="frame based summary")
+
+    provider.text_chat = fake_text_chat
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "max_base64_mb": 10,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:111",
+        message_id="query_frame_fallback",
+        message_chain=[Reply(id="r_frame", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    req = ProviderRequest(prompt="这个视频在讲什么？")
+
+    with patch.object(
+        plugin,
+        "_extract_frame_data_urls",
+        return_value=["data:image/jpeg;base64,AAAA"],
+    ):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(provider.calls) == 2
+    assert len(req.contexts) == 1
+    rewritten = req.contexts[0]["content"]
+    assert any(
+        part.get("type") == "text"
+        and "frame based summary" in part.get("text", "")
+        for part in rewritten
+    )
+    assert not any(part.get("type") == "video_url" for part in rewritten)
+
+
+@pytest.mark.asyncio
+async def test_current_provider_media_rejection_skips_native_video_injection(tmp_path: Path):
+    video_file = tmp_path / "reject_all.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {"id": "chat_kimi", "api_base": "https://api.moonshot.cn/v1", "model": "kimi-k2.5"}
+    )
+
+    async def fake_text_chat(**kwargs):
+        provider.calls.append(kwargs)
+        content = kwargs["contexts"][0]["content"]
+        if any(part.get("type") == "video_url" for part in content):
+            raise RuntimeError("No endpoints found that support input video")
+        raise RuntimeError("supported types: ['text']")
+
+    provider.text_chat = fake_text_chat
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "max_base64_mb": 10,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:112",
+        message_id="query_skip_injection",
+        message_chain=[Reply(id="r_skip", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    req = ProviderRequest(prompt="这个视频在讲什么？")
+
+    with patch.object(
+        plugin,
+        "_extract_frame_data_urls",
+        return_value=["data:image/jpeg;base64,BBBB"],
+    ):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(provider.calls) == 2
+    assert req.contexts == []
+    assert req.prompt == "这个视频在讲什么？"
+
+
 def test_global_llm_metadata_is_used_for_strategy_detection():
     provider = DummyProvider(
         {

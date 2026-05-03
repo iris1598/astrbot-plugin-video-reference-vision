@@ -1,35 +1,103 @@
 # 引用视频理解
 
-给 AstrBot 用的一个小插件：用户引用一条视频消息提问时，把这条视频按 `video_url` 的形式塞进本次 LLM 请求里，让支持视频输入的模型真的去看视频。
+给 AstrBot 用的一个小插件：用户引用一条视频消息提问时，插件会尽量把“被引用的视频内容”变成模型真正能理解的输入，而不是只把 AstrBot 默认的附件提示文本发过去。
 
-它不是“群里一发视频就自动分析”的插件。这个设计是故意的：大多数视频只是聊天内容，没必要每条都上传、转 base64 或消耗模型 token。只有用户引用视频并明确提问时，插件才会介入。
+它不是“群里一发视频就自动分析”的插件。只有用户引用视频并明确提问时，插件才会介入。
+
+## 现在的真实工作方式
+
+当前版本的默认链路已经不是“无脑把 `video_url` 塞给当前聊天模型”了，而是按下面顺序处理：
+
+1. 先找到被引用的视频。
+2. 优先走“视频转述”链路。
+3. 转述成功后，只把转述文本回写给 AstrBot 主对话。
+4. 只有转述失败且允许回退时，才继续尝试原生 `video_url` 注入。
+
+这样做的原因很直接：很多 OpenAI-compatible 网关、代理层或回退模型并不真正支持 `video_url`，硬塞过去只会把整条请求打失败。
 
 ## 它解决的问题
 
-AstrBot 现在能识别视频消息，也能把视频下载到本地。但在发给模型时，视频通常只会变成一段文本提示，例如：
+AstrBot 能识别视频消息，也会生成类似下面这样的附件提示：
 
 ```text
 [Video Attachment: name demo.mp4, path D:\xxx\demo.mp4]
 ```
 
-模型看到的是“这里有个视频文件”，不是视频内容本身。这个插件做的事情就是：在用户引用视频提问时，把这类附件提示替换成真正的多模态视频输入。
+但这段文本本身不等于“模型读到了视频内容”。模型大概率只知道“这里有个视频文件”，并不知道视频里发生了什么。
 
-目前主要面向 OpenAI-compatible 的多模态接口，优先兼容：
+这个插件的目标是：
 
-- Qwen / DashScope 视频模型
-- OpenRouter 上支持视频输入的模型
-- Kimi 新版视觉模型
-- 其他明确支持 `video_url` 的接口
+- 在用户引用视频提问时，真正恢复出被引用的视频资源。
+- 尽量让模型读取视频内容本身，或者至少读取关键帧。
+- 最终把视频内容变成对当前问题有用的文本输入。
 
-纯文本模型、只支持图片不支持视频的模型，不会因为装了这个插件就突然能看视频。
+## 当前支持的解析链路
+
+插件为了兼容 QQ / OneBot / NapCat 这类场景，已经做了多层兜底：
+
+1. 优先从 `Reply.chain` 里直接取 `Video`。
+2. 如果引用链不完整，就用 `Reply.id` 去插件缓存里找。
+3. 如果缓存里拿到的是无效 `file`，会尝试通过 OneBot/NapCat 的 `get_msg` 回查原始消息。
+4. 如果原始 `video` 段里只有资源 ID，还会继续调用 `get_file` 解析成真实 URL 或本地文件。
+5. 如果前面都没拿到，再尝试从 AstrBot 默认生成的 `[Video Attachment ...]` 文本里反解析本地路径。
+
+这也是它在 QQ 引用视频场景里比“只读 `Reply.chain`”更稳的原因。
+
+## 默认转述链路
+
+拿到视频后，插件会优先尝试把视频内容“转述成文本”。
+
+默认策略如下：
+
+1. 如果配置了 `video_caption_provider_id`，优先用这个模型做视频转述。
+2. 如果没配置，并且 `video_caption_use_current_provider=true`，就先用当前聊天模型做转述。
+3. 如果模型支持原生视频输入，就先尝试直接发 `video_url`。
+4. 如果视频输入被网关拒绝，并且 `video_caption_frame_fallback=true`，就尝试用 `ffmpeg` 抽关键帧，再按 `image_url` 发给转述模型。
+5. 转述成功后，把结果写成一段文本，例如：
+
+```text
+[引用视频内容转述]
+……
+```
+
+然后只把这段文本喂回 AstrBot 主对话。
+
+这个模式对“当前聊天模型不支持视频，但支持图片”的场景尤其有用。
+
+## 原生视频注入现在是什么角色
+
+原生 `video_url` 注入没有被删除，但它现在是回退路径，不再是首选路径。
+
+只有在这些条件满足时，它才会继续尝试：
+
+- 视频转述链路没有成功返回文本。
+- 当前 provider 能匹配到可用的视频策略。
+- `native_video_injection_fallback=true`。
+
+所以如果你看到日志里出现“当前 provider 拒绝视频输入，跳过原生注入”，这通常是插件在避免把整条请求打崩，而不是插件失效了。
+
+## `ffmpeg` 抽帧兜底
+
+当前版本已经实现了 `ffmpeg` 抽帧兜底。
+
+行为是：
+
+- 当视频原生输入被拒绝时，插件会尝试把本地视频抽成若干关键帧。
+- 再把这些关键帧按 `image_url` 发给转述模型。
+- 如果模型支持图片但不支持视频，这条链通常还能工作。
+
+注意：
+
+- 这一步需要环境里能找到 `ffmpeg`；没有就会自动跳过。
+- `ffprobe` 可选；有的话会用来估算视频时长并更均匀地抽帧。
 
 ## 使用方式
 
-推荐用法很简单：
+推荐用法：
 
 1. 先在聊天里发一条视频。
-2. 再引用这条视频，问一个具体问题。
-3. 插件会尝试找到被引用的视频，并把它注入给当前模型。
+2. 再引用这条视频。
+3. 问一个具体问题。
 
 示例：
 
@@ -40,25 +108,28 @@ AstrBot 现在能识别视频消息，也能把视频下载到本地。但在发
 这段视频里的人在做什么？
 ```
 
-如果模型支持视频输入，它应该会根据视频内容回答，而不是只说“看到一个视频附件”。
+插件会尽量把这条引用视频变成：
+
+- 视频转述文本，或
+- 视频关键帧输入，或
+- 最后再回退到原生 `video_url`
+
+而不是只把“这里有个视频附件”交给模型。
 
 ## 普通发视频会发生什么
 
-插件会缓存视频消息的信息，方便后面引用时找回来。缓存阶段不会上传视频，也不会把视频转成 base64。
+插件会缓存视频消息的信息，方便后面引用时找回来。
 
-需要注意的是：插件本身不会对“直接发视频”做视频注入；至于 AstrBot 主流程是否会因为纯视频消息触发一次默认 LLM 请求，取决于你当前的 AstrBot 配置和唤醒逻辑。如果你发现“只发视频也会被机器人回复”，那是 AstrBot 原本的视频附件文本流程在工作，不是本插件在识别视频。
+缓存阶段不会：
 
-后续版本会考虑加一个开关，用来在插件缓存完视频后直接拦截这类纯视频 LLM 请求。
+- 自动分析视频
+- 上传视频
+- 强行触发视频注入
 
-## 插件怎么找被引用的视频
+如果你没有引用视频，只是单独发了一条视频：
 
-引用消息在不同平台上的表现不太一样，尤其是 QQ / OneBot v11：有时引用链很完整，有时只给一个 reply id。所以插件做了几层兜底：
-
-1. 优先从 `Reply.chain` 里直接取 `Video`。
-2. 如果引用链不完整，就用 `Reply.id` 去插件缓存里找。
-3. 如果缓存也没命中，再尝试从 AstrBot 默认生成的 `[Video Attachment ...]` 文本里反解析本地路径。
-
-这也是为什么这个插件对 QQ 场景会比“只读 Reply.chain”的实现更稳一些。
+- 插件默认不会主动帮你分析
+- 如果 `allow_direct_video=false` 且 `intercept_direct_video_llm_request=true`，插件还会拦截这类“非引用的纯视频请求”
 
 ## 安装
 
@@ -79,57 +150,94 @@ README.md
 
 重载插件后，在 WebUI 里确认插件已经启用。
 
-## 配置项说明
+## 关键配置项
 
-默认配置可以先不动。常用项大概是这些：
+### 基础行为
 
 - `enabled`：是否启用插件。
-- `mode`：建议先用 `auto`；`force` 会强行尝试注入，调试时再用。
+- `mode`：建议先用 `auto`；`force` 会更激进地匹配视频能力，调试时再用。
+- `fallback_behavior`：失败时怎么处理。默认 `keep_text`，也就是保留 AstrBot 原来的附件文本提示；`silent` 会尽量移除它。
+- `allow_direct_video`：是否允许“当前消息直接带视频”时也注入视频。默认关闭。
+- `intercept_direct_video_llm_request`：不允许直发视频时，是否拦截这类请求。
+
+### QQ / OneBot / NapCat 相关
+
+- `enable_onebot_media_resolver`：当引用视频只有资源 ID、文件名或不完整引用链时，尝试通过 OneBot/NapCat 的 `get_msg` / `get_file` 回查真实资源。
+- `cache_ttl_seconds`：视频缓存保留多久。
+- `cache_max_entries`：全局缓存上限。
+
+### 转述链路
+
+- `video_caption_provider_id`：单独指定视频转述模型。留空时会优先用当前聊天模型做转述。
+- `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
+- `video_caption_prompt`：发给视频转述模型的提示词。
+- `video_caption_use_current_question`：转述时是否带上用户当前问题。
+
+### 抽帧兜底
+
+- `video_caption_frame_fallback`：视频原生输入失败时，是否用 `ffmpeg` 抽帧后改走图片输入。
+- `video_caption_frame_count`：最多发多少张关键帧。
+- `ffmpeg_path`：可选，手动指定 `ffmpeg` 路径。
+- `ffprobe_path`：可选，手动指定 `ffprobe` 路径。
+
+### 原生视频注入
+
+- `native_video_injection_fallback`：转述链路失败后，是否继续回退到原生 `video_url` 注入。
 - `prefer_public_url`：视频本身是公网 URL 时，优先直接传 URL。
-- `max_base64_mb`：本地视频转 base64 的大小上限，默认 20MB。
-- `qwen_fps`：Qwen / DashScope 的视频抽帧频率，默认 2.0。
-- `generic_fps`：通用 OpenAI-compatible 模式下使用的 fps。
-- `fallback_behavior`：注入失败时怎么处理。默认 `keep_text`，也就是保留 AstrBot 原来的附件文本提示。
-- `allow_direct_video`：是否允许“当前消息直接带视频”时也注入视频。默认关闭，推荐保持关闭。
+- `max_base64_mb`：本地视频转 base64 的大小上限。
+- `remove_default_video_text`：成功注入后，是否移除默认的 `[Video Attachment ...]` 文本。
 
-Kimi 相关：
+### Kimi 相关
 
-- `kimi_strategy=auto`：自动选择策略。
-- `kimi_strategy=upload`：上传视频后用 `ms://file_id` 引用。
-- `kimi_strategy=base64`：直接把视频转 base64。
-- `kimi_upload_on_oversize=true`：视频超过 base64 限制时，自动尝试 Kimi 上传模式。
+- `kimi_strategy=auto`：自动决定走 base64 还是上传。
+- `kimi_strategy=upload`：强制先上传，再用 `ms://file_id` 引用。
+- `kimi_strategy=base64`：强制本地转 base64。
+- `kimi_upload_on_oversize=true`：视频超过 base64 限制时，自动改走上传模式。
+- `kimi_api_base`：可选覆盖 Kimi 接口地址。
+
+### GIF
+
+- `enable_gif_input`：把被引用的 GIF 按完整动图处理，而不是只看第一帧。
 
 ## 当前已经实现
 
-- 引用视频触发，不主动把每条视频都喂给模型。
-- 视频消息缓存，支持通过 `Reply.id` 回查。
-- 从 `Reply.chain` 直接读取视频。
-- 从 `[Video Attachment ...]` 文本里兜底解析本地路径。
+- 引用视频触发，不主动分析所有视频。
+- 视频消息缓存，支持按 `Reply.id` 回查。
+- QQ / OneBot / NapCat 场景下通过 `get_msg` / `get_file` 回查真实视频资源。
+- 本地路径失效时的安全兜底，不再因裸文件名直接抛错。
+- 视频转述模型链路。
+- 未单独指定转述模型时，优先使用当前聊天模型尝试转述。
+- 视频原生输入失败时，自动抽帧并改走图片输入。
+- 转述成功后，把结果回写成文本，不再继续把 `video_url` 传给主对话。
+- 必要时再回退到原生 `video_url` 注入。
 - Qwen / DashScope 的 `video_url` 注入。
 - OpenRouter / 通用 OpenAI-compatible 的 `video_url` 注入。
 - Kimi 上传模式入口。
-- 注入成功后移除默认视频附件文本，避免模型同时看到“真实视频”和“本地路径提示”。
 
-## 目前不做的事
+## 目前仍不做的事
 
 这些不在当前版本目标里：
 
 - 收到视频后立刻自动分析。
-- ffmpeg 抽帧兜底。
-- 音轨转写。
-- 给所有厂商做完整适配。
-- 把视频能力改进 AstrBot core。
-
-现在先把“引用视频提问”这条链路跑稳，后面的事再慢慢补。
+- 自动做音轨转写。
+- 给所有厂商做完整私有协议适配。
+- 改 AstrBot core，让所有 provider 都原生理解视频能力。
 
 ## 排查问题
 
-引用视频后，如果模型还是只回答“有一个视频附件”，优先检查这些：
+如果引用视频后仍然不符合预期，优先看这些：
 
-- 当前模型是否真的支持视频输入。
-- 插件是否启用。
+- 当前聊天模型或转述模型是否真的支持视频，或者至少支持图片。
+- 日志里是否出现：
+  - `resolved ... via OneBot get_msg/get_file`
+  - `video caption request failed`
+  - `frame caption request failed`
+  - `current provider rejected media caption input, skip native video injection`
+- 环境里是否有可用的 `ffmpeg`。
 - 视频是否超过 `max_base64_mb`。
-- 当前 provider 是否是 OpenAI-compatible 接口。
-- 日志里是否有“跳过处理”“视频过大”“Kimi 上传失败”等提示。
-- QQ 引用链是否丢失，且视频缓存是否已经过期。
+- QQ 引用链是否丢失，且缓存是否已经过期。
 
+如果日志显示：
+
+- 视频输入被拒绝，但随后抽帧成功并生成转述文本：这是正常降级。
+- 视频和图片都被当前 provider 拒绝：说明这条接入本身不适合做视频理解，建议单独配置一个视频转述模型。

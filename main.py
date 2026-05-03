@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import glob
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -18,7 +23,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
-from astrbot.core.agent.message import ContentPart
+from astrbot.core.agent.message import ContentPart, ImageURLPart
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 
@@ -54,6 +59,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_provider_id": "",
     "video_caption_prompt": DEFAULT_VIDEO_CAPTION_PROMPT,
     "video_caption_use_current_question": True,
+    "video_caption_use_current_provider": True,
+    "video_caption_frame_fallback": True,
+    "video_caption_frame_count": 4,
+    "native_video_injection_fallback": True,
+    "ffmpeg_path": "",
+    "ffprobe_path": "",
     "enable_gif_input": False,
 }
 
@@ -347,6 +358,17 @@ class CachedVideoMessage:
     expires_at: int
 
 
+@dataclass
+class CaptionAttemptResult:
+    summary_text: str | None = None
+    video_rejected: bool = False
+    image_rejected: bool = False
+
+    @property
+    def blocks_native_video(self) -> bool:
+        return self.video_rejected or self.image_rejected
+
+
 class VideoMessageCache:
     def __init__(self, ttl_seconds: int, max_entries: int) -> None:
         self.ttl_seconds = max(1, int(ttl_seconds))
@@ -528,16 +550,37 @@ class Main(Star):
         max_videos = max(1, int(self.config.get("max_videos_per_request", 1)))
         quoted_media = quoted_media[:max_videos]
 
-        caption_provider, caption_strategy = self._resolve_video_caption_provider(mode=mode)
-        if caption_provider and caption_strategy:
-            summary_text = await self._summarize_media_with_provider(
+        caption_provider, caption_strategy, using_current_caption_provider = (
+            self._resolve_video_caption_provider(
+                mode=mode,
+                current_provider=current_provider,
+                current_strategy=current_strategy,
+            )
+        )
+        if caption_provider is not None:
+            caption_result = await self._summarize_media_with_provider(
                 media=quoted_media,
                 provider=caption_provider,
                 strategy=caption_strategy,
                 user_question=self._extract_user_question(event, req),
             )
-            if summary_text:
-                await self._rewrite_request_with_caption_text(req, summary_text)
+            if caption_result.summary_text:
+                await self._rewrite_request_with_caption_text(
+                    req,
+                    caption_result.summary_text,
+                )
+                return
+            if (
+                using_current_caption_provider
+                and caption_result.blocks_native_video
+            ):
+                if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                    req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                        list(req.extra_user_content_parts or [])
+                    )
+                logger.info(
+                    "video-reference-vision: current provider rejected media caption input, skip native video injection"
+                )
                 return
 
         if current_strategy is None:
@@ -546,6 +589,16 @@ class Main(Star):
                     list(req.extra_user_content_parts or [])
                 )
             logger.debug("video-reference-vision: skip, provider strategy not matched")
+            return
+
+        if not bool(self.config.get("native_video_injection_fallback", True)):
+            if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                    list(req.extra_user_content_parts or [])
+                )
+            logger.info(
+                "video-reference-vision: native video injection fallback disabled"
+            )
             return
 
         video_parts: list[dict] = []
@@ -581,10 +634,20 @@ class Main(Star):
             return False
         return bool(_extract_supported_media_from_chain(message_chain, self.config))
 
-    def _resolve_video_caption_provider(self, *, mode: str) -> tuple[Any | None, str | None]:
+    def _resolve_video_caption_provider(
+        self,
+        *,
+        mode: str,
+        current_provider: Any | None = None,
+        current_strategy: str | None = None,
+    ) -> tuple[Any | None, str | None, bool]:
         provider_id = str(self.config.get("video_caption_provider_id", "") or "").strip()
         if not provider_id:
-            return None, None
+            if not bool(self.config.get("video_caption_use_current_provider", True)):
+                return None, None, False
+            if current_provider is None:
+                return None, None, False
+            return current_provider, current_strategy, True
 
         provider = self.context.get_provider_by_id(provider_id)
         if provider is None:
@@ -592,7 +655,7 @@ class Main(Star):
                 "video-reference-vision: configured video caption provider not found: %s",
                 provider_id,
             )
-            return None, None
+            return None, None, False
 
         strategy = _detect_video_strategy(
             provider,
@@ -602,18 +665,17 @@ class Main(Star):
             ),
         )
         if strategy is None:
-            logger.warning(
-                "video-reference-vision: configured video caption provider does not support video input: %s",
+            logger.info(
+                "video-reference-vision: configured video caption provider has no native video strategy, will rely on frame fallback if possible: %s",
                 provider_id,
             )
-            return None, None
         if not _provider_allowed(provider, strategy, self.config):
             logger.info(
                 "video-reference-vision: configured video caption provider filtered by allow/deny list: %s",
                 provider_id,
             )
-            return None, None
-        return provider, strategy
+            return None, None, False
+        return provider, strategy, False
 
     def _find_reply_id(self, event: AstrMessageEvent) -> str:
         msg_obj = getattr(event, "message_obj", None)
@@ -780,46 +842,251 @@ class Main(Star):
             prompt_text = f"{prompt_text}\n\n用户当前问题：{user_question}"
         return prompt_text
 
+    def _looks_like_rejected_media_error(self, exc: Exception, *, media_kind: str) -> bool:
+        text = str(exc or "").lower()
+        if media_kind == "video":
+            tokens = (
+                "video_url",
+                "input video",
+                "support input video",
+                "unsupported video",
+                "does not support video",
+                "does not support 'video_url'",
+                "supported types: ['text', 'image']",
+                'supported types: ["text", "image"]',
+            )
+            return any(token in text for token in tokens)
+        if media_kind == "image":
+            tokens = (
+                "image_url",
+                "input image",
+                "support input image",
+                "unsupported image",
+                "does not support image",
+                "supported types: ['text']",
+                'supported types: ["text"]',
+            )
+            return any(token in text for token in tokens)
+        return False
+
+    def _get_ffmpeg_command(self) -> str:
+        return str(self.config.get("ffmpeg_path", "") or "").strip() or "ffmpeg"
+
+    def _get_ffprobe_command(self) -> str:
+        return str(self.config.get("ffprobe_path", "") or "").strip() or "ffprobe"
+
+    def _probe_media_duration_seconds(self, local_path: str) -> float | None:
+        ffprobe_cmd = self._get_ffprobe_command()
+        if shutil.which(ffprobe_cmd) is None and not os.path.exists(ffprobe_cmd):
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    ffprobe_cmd,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    local_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+        value = str(proc.stdout or "").strip()
+        if not value:
+            return None
+        try:
+            duration = float(value)
+        except ValueError:
+            return None
+        return duration if duration > 0 else None
+
+    def _extract_frame_data_urls_sync(
+        self,
+        *,
+        local_path: str,
+        frame_count: int,
+    ) -> list[str]:
+        ffmpeg_cmd = self._get_ffmpeg_command()
+        if shutil.which(ffmpeg_cmd) is None and not os.path.exists(ffmpeg_cmd):
+            raise FileNotFoundError(f"ffmpeg not found: {ffmpeg_cmd}")
+
+        duration_seconds = self._probe_media_duration_seconds(local_path)
+        fps_expr = "1"
+        if duration_seconds and duration_seconds > 0:
+            fps_value = max(frame_count / max(duration_seconds, 1.0), 0.1)
+            fps_expr = f"{fps_value:.6f}"
+
+        with tempfile.TemporaryDirectory(prefix="video_ref_frames_") as tmp_dir:
+            output_pattern = os.path.join(tmp_dir, "frame_%03d.jpg")
+            subprocess.run(
+                [
+                    ffmpeg_cmd,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    local_path,
+                    "-vf",
+                    f"fps={fps_expr}",
+                    "-frames:v",
+                    str(frame_count),
+                    output_pattern,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            frame_files = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.jpg")))
+            return [_file_to_data_url(path, mime_hint="image/jpeg") for path in frame_files]
+
+    async def _extract_frame_data_urls(self, media: SupportedMedia) -> list[str]:
+        frame_count = max(1, int(self.config.get("video_caption_frame_count", 4)))
+        refs: list[str] = []
+        if isinstance(media, Video):
+            cover_ref = str(media.cover or "").strip()
+            if _is_usable_media_ref(cover_ref):
+                refs.append(cover_ref)
+
+        try:
+            local_path = await self._resolve_media_local_path(media)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "video-reference-vision: failed to resolve local media path for frame fallback: %s",
+                exc,
+            )
+            return refs
+
+        try:
+            frame_refs = await asyncio.to_thread(
+                self._extract_frame_data_urls_sync,
+                local_path=local_path,
+                frame_count=frame_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "video-reference-vision: frame extraction failed: %s",
+                exc,
+            )
+            return refs
+
+        for item in frame_refs:
+            if item not in refs:
+                refs.append(item)
+        return refs
+
+    async def _build_frame_caption_blocks(
+        self,
+        *,
+        media: list[SupportedMedia],
+    ) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for media_index, item in enumerate(media, start=1):
+            frame_refs = await self._extract_frame_data_urls(item)
+            for frame_index, frame_ref in enumerate(frame_refs, start=1):
+                blocks.append(
+                    ImageURLPart(
+                        image_url=ImageURLPart.ImageURL(
+                            url=frame_ref,
+                            id=f"video_{media_index}_frame_{frame_index}",
+                        )
+                    ).model_dump()
+                )
+        return blocks
+
     async def _summarize_media_with_provider(
         self,
         *,
         media: list[SupportedMedia],
         provider: Any,
-        strategy: str,
+        strategy: str | None,
         user_question: str,
-    ) -> str | None:
-        video_parts: list[dict] = []
-        for item in media:
-            part = await self._build_video_part(
-                item,
-                strategy=strategy,
-                provider=provider,
-            )
-            if part:
-                video_parts.append(part)
-        if not video_parts:
-            return None
+    ) -> CaptionAttemptResult:
+        result = CaptionAttemptResult()
+
+        if strategy:
+            video_parts: list[dict] = []
+            for item in media:
+                part = await self._build_video_part(
+                    item,
+                    strategy=strategy,
+                    provider=provider,
+                )
+                if part:
+                    video_parts.append(part)
+            if video_parts:
+                contexts = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self._build_video_caption_prompt(user_question)},
+                            *video_parts,
+                        ],
+                    }
+                ]
+                try:
+                    llm_resp = await provider.text_chat(contexts=contexts)
+                except Exception as exc:  # noqa: BLE001
+                    if self._looks_like_rejected_media_error(exc, media_kind="video"):
+                        result.video_rejected = True
+                    logger.warning(
+                        "video-reference-vision: video caption request failed: %s",
+                        exc,
+                    )
+                else:
+                    summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
+                    if summary:
+                        result.summary_text = summary
+                        return result
+                    logger.warning(
+                        "video-reference-vision: video caption provider returned empty text"
+                    )
+
+        if not bool(self.config.get("video_caption_frame_fallback", True)):
+            return result
+
+        frame_blocks = await self._build_frame_caption_blocks(media=media)
+        if not frame_blocks:
+            return result
 
         contexts = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": self._build_video_caption_prompt(user_question)},
-                    *video_parts,
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{self._build_video_caption_prompt(user_question)}\n\n"
+                            "If direct video input is unavailable, infer the answer from the extracted key frames."
+                        ),
+                    },
+                    *frame_blocks,
                 ],
             }
         ]
         try:
             llm_resp = await provider.text_chat(contexts=contexts)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("video-reference-vision: video caption request failed: %s", exc)
-            return None
+            if self._looks_like_rejected_media_error(exc, media_kind="image"):
+                result.image_rejected = True
+            logger.warning(
+                "video-reference-vision: frame caption request failed: %s",
+                exc,
+            )
+            return result
 
         summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
         if not summary:
-            logger.warning("video-reference-vision: video caption provider returned empty text")
-            return None
-        return summary
+            logger.warning("video-reference-vision: frame caption provider returned empty text")
+            return result
+        result.summary_text = summary
+        return result
 
     def _extract_quoted_media(
         self,
