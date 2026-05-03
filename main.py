@@ -96,6 +96,16 @@ def _is_http_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
 
 
+def _provider_api_base(provider: Any) -> str:
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    return str(provider_config.get("api_base", "") or "").strip().lower()
+
+
+def _supports_kimi_file_upload(provider: Any) -> bool:
+    api_base = _provider_api_base(provider)
+    return "moonshot" in api_base or "kimi.ai" in api_base
+
+
 def _is_video_attachment_text(text: str) -> bool:
     return text.startswith("[Video Attachment")
 
@@ -183,7 +193,7 @@ def _detect_video_strategy(
 
     provider_config = getattr(provider, "provider_config", {}) or {}
     model = str(getattr(provider, "get_model", lambda: "")() or "").lower()
-    api_base = str(provider_config.get("api_base", "") or "").lower()
+    api_base = _provider_api_base(provider)
     provider_name = str(provider_config.get("provider", "") or "").lower()
 
     if any(token in api_base for token in ("moonshot", "kimi")) or "kimi" in model:
@@ -1496,8 +1506,23 @@ class Main(Star):
         kimi_part_mode = self._resolve_kimi_part_mode(strategy=strategy, size_bytes=None)
         mime_hint = _media_mime_hint(media)
         allow_kimi_upload = not _is_gif_media(media)
+        kimi_upload_supported = allow_kimi_upload and _supports_kimi_file_upload(provider)
 
-        if strategy == "kimi" and kimi_part_mode == "upload" and allow_kimi_upload:
+        if (
+            strategy == "kimi"
+            and kimi_part_mode == "upload"
+            and allow_kimi_upload
+            and not kimi_upload_supported
+        ):
+            logger.info(
+                "video-reference-vision: current Kimi-compatible endpoint does not expose file upload, fallback to local base64"
+            )
+
+        if (
+            strategy == "kimi"
+            and kimi_part_mode == "upload"
+            and kimi_upload_supported
+        ):
             try:
                 local_path = await self._resolve_media_local_path(media)
             except Exception as exc:  # noqa: BLE001
@@ -1512,7 +1537,7 @@ class Main(Star):
                 local_path=local_path,
             )
 
-        if prefer_public_url and _is_http_url(file_ref):
+        if prefer_public_url and _is_http_url(file_ref) and strategy != "kimi":
             logger.info("video-reference-vision: using public media URL")
             video_url = file_ref
         else:
@@ -1528,7 +1553,7 @@ class Main(Star):
             size_bytes = os.path.getsize(local_path)
             max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
             if size_bytes > max_size_mb * 1024 * 1024 and (
-                strategy != "kimi" or not allow_kimi_upload
+                strategy != "kimi" or not kimi_upload_supported
             ):
                 logger.warning(
                     "video-reference-vision: skip oversized local media (%.2fMB > %dMB): %s",
@@ -1538,10 +1563,15 @@ class Main(Star):
                 )
                 return None
 
-            if strategy == "kimi" and allow_kimi_upload and self._resolve_kimi_part_mode(
-                strategy=strategy,
-                size_bytes=size_bytes,
-            ) == "upload":
+            if (
+                strategy == "kimi"
+                and kimi_upload_supported
+                and self._resolve_kimi_part_mode(
+                    strategy=strategy,
+                    size_bytes=size_bytes,
+                )
+                == "upload"
+            ):
                 logger.info("video-reference-vision: using Kimi upload mode")
                 return await self._build_kimi_upload_video_part(
                     provider=provider,

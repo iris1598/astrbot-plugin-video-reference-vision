@@ -556,6 +556,60 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_opencode_kimi_remote_video_uses_base64_not_public_url(tmp_path: Path):
+    local_video = tmp_path / "opencode_kimi.mp4"
+    local_video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "id": "chat_opencode_kimi",
+            "api_base": "https://opencode.ai/zen/go/v1/chat/completions",
+            "model": "opencode-go/kimi-k2.6",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "prefer_public_url": True,
+            "kimi_strategy": "auto",
+            "max_base64_mb": 10,
+        },
+    )
+
+    remote_video = Video(file="https://example.com/opencode-kimi.mp4")
+
+    async def fake_convert_to_file_path(self):
+        del self
+        return str(local_video)
+
+    event = make_event(
+        session_id="platform:group:109b",
+        message_id="query_4b",
+        message_chain=[Reply(id="k3b", chain=[remote_video])],
+        message_str="read this remote video",
+    )
+    req = ProviderRequest(prompt="read this remote video")
+
+    with patch.object(Video, "convert_to_file_path", fake_convert_to_file_path):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(req.contexts) == 1
+    content = req.contexts[0]["content"]
+    assert any(
+        part.get("type") == "video_url"
+        and str(part.get("video_url", {}).get("url", "")).startswith("data:video/")
+        for part in content
+    )
+    assert not any(
+        part.get("type") == "video_url"
+        and str(part.get("video_url", {}).get("url", "")).startswith("https://")
+        for part in content
+    )
+
+
+@pytest.mark.asyncio
 async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path: Path):
     video_file = tmp_path / "caption.mp4"
     video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
