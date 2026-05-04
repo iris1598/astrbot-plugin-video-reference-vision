@@ -215,6 +215,12 @@
     "hint": "未单独指定视频转述模型时，先让当前聊天模型尝试直接读视频或读取抽帧结果；成功后只把转述文本喂回主对话。",
     "default": true
   },
+  "video_caption_context_cache_rounds": {
+    "type": "int",
+    "description": "转述上下文保留轮数",
+    "hint": "视频转述成功后，把转述文本在同一会话后续多少轮 LLM 请求里继续作为文本上下文注入。填 0 表示不缓存；例如填 5 表示后续 5 轮都能继续参考这个视频内容。",
+    "default": 0
+  },
   "video_caption_frame_fallback": {
     "type": "bool",
     "description": "转述失败时抽帧兜底",

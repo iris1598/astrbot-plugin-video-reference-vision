@@ -90,6 +90,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_frame_fps": 1.0,
     "video_caption_frame_auto_min_context_k": 150,
     "video_caption_frame_auto_max_context_k": 200,
+    "video_caption_context_cache_rounds": 0,
     "native_video_injection_fallback": True,
     "video_caption_direct_enabled": False,
     "video_caption_direct_transport": VIDEO_TRANSPORT_AUTO,
@@ -662,6 +663,15 @@ class CachedVideoMessage:
 
 
 @dataclass
+class CachedVideoCaptionContext:
+    session_id: str
+    message_id: str
+    caption_text: str
+    remaining_rounds: int
+    created_at: int
+
+
+@dataclass
 class CaptionAttemptResult:
     summary_text: str | None = None
     video_rejected: bool = False
@@ -833,6 +843,78 @@ class VideoMessageCache:
             self._items.popitem(last=False)
 
 
+class VideoCaptionContextCache:
+    def __init__(self, max_entries: int) -> None:
+        self.max_entries = max(1, int(max_entries))
+        self._items: OrderedDict[tuple[str, str], CachedVideoCaptionContext] = OrderedDict()
+
+    def put(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        caption_text: str,
+        rounds: int,
+        now_ts: int | None = None,
+    ) -> None:
+        sid = session_id.strip()
+        mid = _normalized_message_id(message_id)
+        text = caption_text.strip()
+        keep_rounds = max(0, int(rounds))
+        if not sid or not text or keep_rounds <= 0:
+            return
+        if not mid:
+            mid = f"caption-{int((now_ts or time.time()) * 1000)}-{uuid.uuid4().hex}"
+        key = (sid, mid)
+        self._items[key] = CachedVideoCaptionContext(
+            session_id=sid,
+            message_id=mid,
+            caption_text=text,
+            remaining_rounds=keep_rounds,
+            created_at=int(now_ts or time.time()),
+        )
+        self._items.move_to_end(key)
+        self._prune()
+
+    def consume(self, *, session_id: str) -> list[CachedVideoCaptionContext]:
+        sid = session_id.strip()
+        if not sid:
+            return []
+        self._prune()
+        consumed: list[CachedVideoCaptionContext] = []
+        for key in list(self._items.keys()):
+            item = self._items.get(key)
+            if item is None or item.session_id != sid:
+                continue
+            if item.remaining_rounds <= 0:
+                self._items.pop(key, None)
+                continue
+            consumed.append(
+                CachedVideoCaptionContext(
+                    session_id=item.session_id,
+                    message_id=item.message_id,
+                    caption_text=item.caption_text,
+                    remaining_rounds=item.remaining_rounds,
+                    created_at=item.created_at,
+                )
+            )
+            item.remaining_rounds -= 1
+            if item.remaining_rounds <= 0:
+                self._items.pop(key, None)
+            else:
+                self._items.move_to_end(key)
+        return consumed
+
+    def _prune(self) -> None:
+        expired_keys = [
+            key for key, item in self._items.items() if item.remaining_rounds <= 0
+        ]
+        for key in expired_keys:
+            self._items.pop(key, None)
+        while len(self._items) > self.max_entries:
+            self._items.popitem(last=False)
+
+
 class Main(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context, config)
@@ -843,6 +925,9 @@ class Main(Star):
         self.config = merged
         self.video_cache = VideoMessageCache(
             ttl_seconds=int(self.config.get("cache_ttl_seconds", 7200)),
+            max_entries=int(self.config.get("cache_max_entries", 500)),
+        )
+        self.caption_context_cache = VideoCaptionContextCache(
             max_entries=int(self.config.get("cache_max_entries", 500)),
         )
 
@@ -1086,6 +1171,8 @@ class Main(Star):
             event.stop_event()
             return
 
+        self._inject_cached_caption_context(event, req)
+
         reply_id = self._find_reply_id(event)
         quoted_media = self._extract_quoted_media(event, req=req)
         quoted_media = await self._resolve_unusable_media_with_onebot(
@@ -1118,6 +1205,7 @@ class Main(Star):
                     "video-reference-vision: 视频转述结果：%s",
                     caption_result.summary_text,
                 )
+                self._cache_caption_context(event, caption_result.summary_text)
                 await self._rewrite_request_with_caption_text(
                     req,
                     caption_result.summary_text,
@@ -1205,6 +1293,66 @@ class Main(Star):
         if any(isinstance(comp, Reply) for comp in message_chain):
             return False
         return bool(_extract_supported_media_from_chain(message_chain, self.config))
+
+    def _caption_context_cache_rounds(self) -> int:
+        try:
+            rounds = int(self.config.get("video_caption_context_cache_rounds", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(rounds, 100))
+
+    def _cache_caption_context(
+        self,
+        event: AstrMessageEvent,
+        caption_text: str,
+    ) -> None:
+        rounds = self._caption_context_cache_rounds()
+        if rounds <= 0:
+            return
+        msg_obj = getattr(event, "message_obj", None)
+        message_id = _normalized_message_id(getattr(msg_obj, "message_id", ""))
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        self.caption_context_cache.put(
+            session_id=session_id,
+            message_id=message_id,
+            caption_text=caption_text,
+            rounds=rounds,
+        )
+        logger.info(
+            "video-reference-vision: 已缓存视频转述上下文，后续可保留 %d 轮",
+            rounds,
+        )
+
+    def _inject_cached_caption_context(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        if self._caption_context_cache_rounds() <= 0:
+            return
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        cached_items = self.caption_context_cache.consume(session_id=session_id)
+        if not cached_items:
+            return
+        extra_parts = list(req.extra_user_content_parts or [])
+        extra_parts.append(TextPart(text=self._format_cached_caption_context(cached_items)))
+        req.extra_user_content_parts = extra_parts
+        logger.info(
+            "video-reference-vision: 已注入缓存视频转述上下文：条数=%d",
+            len(cached_items),
+        )
+
+    def _format_cached_caption_context(
+        self,
+        cached_items: list[CachedVideoCaptionContext],
+    ) -> str:
+        lines = [
+            "[历史引用视频内容转述]",
+            "以下是本会话最近引用过的视频转述内容，回答当前问题时可以参考。",
+        ]
+        for index, item in enumerate(cached_items, start=1):
+            lines.append(f"视频 {index}：\n{item.caption_text}")
+        return "\n\n".join(lines)
 
     def _resolve_video_caption_provider(
         self,

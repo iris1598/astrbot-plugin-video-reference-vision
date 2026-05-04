@@ -189,6 +189,7 @@ README.md
 - `video_caption_direct_test_entry`：设置页里显式显示测试命令入口。当前 AstrBot WebUI 还不支持插件在这里直接挂一个自定义动作按钮，所以这里会直接提示使用 `/video_ref_test`。
 - `video_caption_prompt`：发给视频转述模型的提示词。
 - `video_caption_use_current_question`：转述时是否带上用户当前问题。
+- `video_caption_context_cache_rounds`：视频转述成功后，在同一会话后续多少轮 LLM 请求里继续注入这段转述文本。默认 `0` 表示不缓存；例如填 `5`，后续 5 轮普通对话仍会带上最近引用视频的转述内容。
 
 ### 抽帧兜底
 

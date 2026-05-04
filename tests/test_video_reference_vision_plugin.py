@@ -25,6 +25,7 @@ sys.modules[spec.name] = plugin_module
 spec.loader.exec_module(plugin_module)
 
 VideoMessageCache = plugin_module.VideoMessageCache
+VideoCaptionContextCache = plugin_module.VideoCaptionContextCache
 Main = plugin_module.Main
 MediaProbeInfo = plugin_module.MediaProbeInfo
 TokenUsageSnapshot = plugin_module.TokenUsageSnapshot
@@ -130,6 +131,27 @@ def test_video_cache_put_get_and_expire():
     )
     assert cache.get(session_id="s1", message_id="m1", now_ts=101) is not None
     assert cache.get(session_id="s1", message_id="m1", now_ts=106) is None
+
+
+def test_video_caption_context_cache_consumes_configured_rounds():
+    cache = VideoCaptionContextCache(max_entries=10)
+    cache.put(
+        session_id="s1",
+        message_id="m1",
+        caption_text="视频里有人在介绍配置。",
+        rounds=2,
+        now_ts=100,
+    )
+
+    first = cache.consume(session_id="s1")
+    second = cache.consume(session_id="s1")
+    third = cache.consume(session_id="s1")
+
+    assert [item.caption_text for item in first] == ["视频里有人在介绍配置。"]
+    assert first[0].remaining_rounds == 2
+    assert [item.caption_text for item in second] == ["视频里有人在介绍配置。"]
+    assert second[0].remaining_rounds == 1
+    assert third == []
 
 
 def test_extract_path_from_video_attachment_text_windows_style():
@@ -934,6 +956,7 @@ def test_plugin_init_backfills_new_config_defaults_for_settings_page():
     assert config["video_caption_frame_mode"] == "auto"
     assert config["video_caption_frame_auto_min_context_k"] == 150
     assert config["video_caption_frame_auto_max_context_k"] == 200
+    assert config["video_caption_context_cache_rounds"] == 0
     assert plugin.config["video_caption_frame_mode"] == "auto"
     assert config.save_calls == 1
 
@@ -1158,6 +1181,83 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
         "366",
         "未知",
     )
+
+
+@pytest.mark.asyncio
+async def test_video_caption_summary_is_cached_for_followup_rounds(tmp_path: Path):
+    video_file = tmp_path / "caption_memory.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    chat_provider = DummyProvider(
+        {"id": "chat_text", "api_base": "https://api.example.com/v1", "provider": "openai_chat_completion", "model": "text-only-model"}
+    )
+    caption_provider = DummyProvider(
+        {"id": "video_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"},
+        completion_text="视频里展示了自动抽帧设置。",
+    )
+    plugin = Main(
+        DummyContext(chat_provider, {"video_qwen": caption_provider}),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "video_caption_provider_id": "video_qwen",
+            "video_caption_context_cache_rounds": 2,
+        },
+    )
+
+    initial_event = make_event(
+        session_id="platform:group:caption_memory",
+        message_id="query_caption_memory_1",
+        message_chain=[Reply(id="r_caption_memory", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    initial_req = ProviderRequest(prompt="这个视频在讲什么？")
+    await plugin.inject_quoted_video(initial_event, initial_req)
+
+    first_followup = make_event(
+        session_id="platform:group:caption_memory",
+        message_id="query_caption_memory_2",
+        message_chain=[],
+        message_str="刚才那个设置有什么作用？",
+    )
+    first_req = ProviderRequest(prompt="刚才那个设置有什么作用？")
+    await plugin.inject_quoted_video(first_followup, first_req)
+
+    second_followup = make_event(
+        session_id="platform:group:caption_memory",
+        message_id="query_caption_memory_3",
+        message_chain=[],
+        message_str="还有什么细节？",
+    )
+    second_req = ProviderRequest(prompt="还有什么细节？")
+    await plugin.inject_quoted_video(second_followup, second_req)
+
+    expired_followup = make_event(
+        session_id="platform:group:caption_memory",
+        message_id="query_caption_memory_4",
+        message_chain=[],
+        message_str="现在还记得吗？",
+    )
+    expired_req = ProviderRequest(prompt="现在还记得吗？")
+    await plugin.inject_quoted_video(expired_followup, expired_req)
+
+    first_content = await _assembled_content(first_req)
+    second_content = await _assembled_content(second_req)
+    expired_content = await _assembled_content(expired_req)
+
+    assert any(
+        part.get("type") == "text"
+        and "[历史引用视频内容转述]" in part.get("text", "")
+        and "视频里展示了自动抽帧设置。" in part.get("text", "")
+        for part in first_content
+    )
+    assert any(
+        part.get("type") == "text"
+        and "[历史引用视频内容转述]" in part.get("text", "")
+        and "视频里展示了自动抽帧设置。" in part.get("text", "")
+        for part in second_content
+    )
+    assert "[历史引用视频内容转述]" not in str(expired_content)
 
 
 @pytest.mark.asyncio
