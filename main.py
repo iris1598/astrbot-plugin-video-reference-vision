@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 import uuid
 
+from openai import BaseModel as OpenAIBaseModel
 from pydantic import BaseModel
 
 from astrbot import logger
@@ -105,7 +106,7 @@ class VideoURLPart(ContentPart):
     fps: float | None = None
 
 
-class KimiFileObject(BaseModel):
+class KimiFileObject(OpenAIBaseModel):
     id: str
 
 
