@@ -26,6 +26,7 @@ spec.loader.exec_module(plugin_module)
 
 VideoMessageCache = plugin_module.VideoMessageCache
 Main = plugin_module.Main
+MediaProbeInfo = plugin_module.MediaProbeInfo
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
 detect_video_strategy = plugin_module._detect_video_strategy
 normalize_openai_base_url = plugin_module._normalize_openai_base_url
@@ -910,6 +911,126 @@ def test_resolve_frame_extraction_params_fps_mode_without_duration():
 
     assert fps_expr == "2.000000"
     assert frame_limit is None
+
+
+def test_resolve_frame_extraction_params_auto_mode_uses_context_budget():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "video_caption_frame_mode": "auto",
+            "video_caption_frame_auto_min_context_k": 150,
+            "video_caption_frame_auto_max_context_k": 200,
+        },
+    )
+
+    plan = plugin._resolve_frame_extraction_params(
+        duration_seconds=10.0,
+        probe_info=MediaProbeInfo(
+            duration_seconds=10.0,
+            width=640,
+            height=360,
+            fps=30.0,
+            frame_count=300,
+        ),
+    )
+
+    assert plan.mode == "auto"
+    assert plan.frame_limit == 12
+    assert plan.fps_expr == "1.200000"
+    assert plan.output_width == 486
+    assert plan.output_height == 272
+    assert plan.target_min_tokens == 150000
+    assert plan.target_max_tokens == 200000
+    assert plan.estimated_total_tokens <= 200000
+
+
+def test_resolve_frame_extraction_params_auto_mode_caps_high_resolution_frames():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "video_caption_frame_mode": "auto",
+            "video_caption_frame_auto_min_context_k": 150,
+            "video_caption_frame_auto_max_context_k": 200,
+        },
+    )
+
+    plan = plugin._resolve_frame_extraction_params(
+        duration_seconds=10.0,
+        probe_info=MediaProbeInfo(
+            duration_seconds=10.0,
+            width=1920,
+            height=1080,
+            fps=30.0,
+            frame_count=300,
+        ),
+    )
+
+    assert plan.mode == "auto"
+    assert plan.frame_limit == 12
+    assert plan.output_width == 486
+    assert plan.output_height == 272
+    assert plan.estimated_total_tokens <= 200000
+    assert plugin._build_ffmpeg_frame_filter(plan) == "fps=1.200000,scale=486:272:flags=lanczos"
+
+
+@pytest.mark.asyncio
+async def test_frame_caption_retries_with_fewer_frames_on_token_limit(tmp_path: Path):
+    video_file = tmp_path / "token_retry.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "id": "chat_kimi_code",
+            "api_base": "https://api.kimi.com/coding/v1",
+            "model": "kimi-for-coding",
+        }
+    )
+    image_counts: list[int] = []
+
+    async def fake_text_chat(**kwargs):
+        provider.calls.append(kwargs)
+        content = kwargs["contexts"][0]["content"]
+        image_count = sum(1 for part in content if part.get("type") == "image_url")
+        image_counts.append(image_count)
+        if image_count > 2:
+            raise RuntimeError(
+                "Invalid request: Your request exceeded model token limit: 262144 (requested: 521251)"
+            )
+        return SimpleNamespace(completion_text="reduced frame summary")
+
+    provider.text_chat = fake_text_chat
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+        },
+    )
+
+    with patch.object(
+        plugin,
+        "_extract_frame_data_urls",
+        return_value=[
+            "data:image/jpeg;base64,AAAA",
+            "data:image/jpeg;base64,BBBB",
+            "data:image/jpeg;base64,CCCC",
+            "data:image/jpeg;base64,DDDD",
+            "data:image/jpeg;base64,EEEE",
+        ],
+    ):
+        result = await plugin._summarize_media_with_provider(
+            media=[Video.fromFileSystem(str(video_file))],
+            provider=provider,
+            strategy="kimi",
+            user_question="这个视频在讲什么？",
+        )
+
+    assert result.summary_text == "reduced frame summary"
+    assert image_counts[-2:] == [5, 2]
 
 
 @pytest.mark.asyncio

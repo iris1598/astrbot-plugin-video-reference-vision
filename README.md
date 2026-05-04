@@ -100,7 +100,7 @@ AstrBot 能识别视频消息，也会生成类似下面这样的附件提示：
 - 插件不会内置 `ffmpeg` / `ffprobe`，需要用户自行安装。
 - 推荐把 `ffmpeg` 与 `ffprobe` 加到系统 `PATH`，插件会自动发现。
 - 如果没有加到 `PATH`，请在插件配置里填写 `ffmpeg_path` 与 `ffprobe_path` 的绝对路径。
-- 当日志出现 `ffmpeg not found` 时，表示当前环境未正确安装或路径未配置。
+- 当日志出现 `未找到 ffmpeg` 时，表示当前环境未正确安装或路径未配置。
 
 ## 使用方式
 
@@ -193,11 +193,15 @@ README.md
 ### 抽帧兜底
 
 - `video_caption_frame_fallback`：视频原生输入失败时，是否用 `ffmpeg` 抽帧后改走图片输入。选择 `kimicode` 时，抽帧会被提升到第一优先级。
-- `video_caption_frame_mode`：抽帧模式。`count` 表示按总帧数均匀抽帧，`fps` 表示按每秒抽帧数量抽帧。
+- `video_caption_frame_mode`：抽帧模式。`auto` 表示按视频时长、分辨率、帧率和上下文预算自动抽帧，并在必要时自动缩小抽帧分辨率；`count` 表示按总帧数均匀抽帧；`fps` 表示按每秒抽帧数量抽帧。
 - `video_caption_frame_count`：最多发多少张关键帧。
 - `video_caption_frame_fps`：仅在 `fps` 模式下生效，表示每秒抽多少帧。
+- `video_caption_frame_auto_min_context_k`：仅在 `auto` 模式下生效，自动抽帧的目标最小上下文，单位为 k token，默认 `150`。
+- `video_caption_frame_auto_max_context_k`：仅在 `auto` 模式下生效，自动抽帧的目标最大上下文，单位为 k token，默认 `200`。建议不要超过 `200`，给 Kimi 262k 上限留出余量。
 - `ffmpeg_path`：可选，手动指定 `ffmpeg` 路径。
 - `ffprobe_path`：可选，手动指定 `ffprobe` 路径。
+
+自动抽帧会在日志中输出视频分辨率、帧率、时长、总帧数、计划抽帧数、输出分辨率、预计 token 消耗和实际抽帧后的 data URL token 估算，方便判断是否接近模型上下文上限。如果抽帧转述请求仍然顶到 token 上限，插件会自动减少帧数并重试。
 
 ### 原生视频注入
 
@@ -249,10 +253,10 @@ README.md
 
 - 当前聊天模型或转述模型是否真的支持视频，或者至少支持图片。
 - 日志里是否出现：
-  - `resolved ... via OneBot get_msg/get_file`
-  - `video caption request failed`
-  - `frame caption request failed`
-  - `current provider rejected media caption input, skip native video injection`
+  - `已通过 OneBot get_msg/get_file 解析到 ... 个引用视频`
+  - `视频转述请求失败`
+  - `抽帧转述请求失败`
+  - `当前提供商拒绝媒体转述输入，跳过原生视频注入`
 - 环境里是否有可用的 `ffmpeg`。
 - 视频是否超过 `max_base64_mb`。
 - QQ 引用链是否丢失，且缓存是否已经过期。

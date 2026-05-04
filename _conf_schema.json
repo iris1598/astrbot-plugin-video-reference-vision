@@ -224,9 +224,10 @@
   "video_caption_frame_mode": {
     "type": "string",
     "description": "抽帧模式",
-    "hint": "`count` 按总帧数均匀抽帧；`fps` 按每秒抽帧数量抽帧。",
-    "default": "count",
+    "hint": "`auto` 会根据视频时长、分辨率、帧率和上下文预算自动决定抽多少帧，并在必要时自动缩小抽帧分辨率；`count` 按总帧数均匀抽帧；`fps` 按每秒抽帧数量抽帧。",
+    "default": "auto",
     "options": [
+      "auto",
       "count",
       "fps"
     ]
@@ -242,6 +243,18 @@
     "description": "每秒抽帧数量",
     "hint": "仅在 `video_caption_frame_mode=fps` 时生效，例如填 `1.0` 表示每秒抽 1 帧。",
     "default": 1.0
+  },
+  "video_caption_frame_auto_min_context_k": {
+    "type": "int",
+    "description": "自动抽帧最小上下文",
+    "hint": "仅在 `video_caption_frame_mode=auto` 时生效，单位为 k token。插件会把它作为自动抽帧的参考下限；默认 150。",
+    "default": 150
+  },
+  "video_caption_frame_auto_max_context_k": {
+    "type": "int",
+    "description": "自动抽帧最大上下文",
+    "hint": "仅在 `video_caption_frame_mode=auto` 时生效，单位为 k token。插件会按这个上限控制抽帧数量和输出分辨率；为了避开 Kimi 262k 上限，建议保持在 150-200 之间；默认 200。",
+    "default": 200
   },
   "native_video_injection_fallback": {
     "type": "bool",

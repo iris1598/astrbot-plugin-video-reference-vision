@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import glob
+import json
 import math
 import mimetypes
 import os
@@ -48,6 +49,15 @@ KIMI_VIDEO_TRANSPORTS = {
     VIDEO_TRANSPORT_KIMI_MOONSHOT,
     VIDEO_TRANSPORT_KIMI_KIMICODE,
 }
+FRAME_MODE_AUTO = "auto"
+FRAME_MODE_COUNT = "count"
+FRAME_MODE_FPS = "fps"
+AUTO_FRAME_DEFAULT_TOKENS = 60000
+AUTO_FRAME_JPEG_BYTES_PER_PIXEL = 0.18
+AUTO_FRAME_BASE64_CHARS_PER_TOKEN = 2.0
+AUTO_FRAME_TEXT_TOKENS = 3000
+AUTO_FRAME_MIN_FRAME_TOKENS = 16000
+AUTO_FRAME_MAX_FRAMES = 80
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -77,9 +87,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_use_current_question": True,
     "video_caption_use_current_provider": True,
     "video_caption_frame_fallback": True,
-    "video_caption_frame_mode": "count",
+    "video_caption_frame_mode": "auto",
     "video_caption_frame_count": 4,
     "video_caption_frame_fps": 1.0,
+    "video_caption_frame_auto_min_context_k": 150,
+    "video_caption_frame_auto_max_context_k": 200,
     "native_video_injection_fallback": True,
     "video_caption_direct_enabled": False,
     "video_caption_direct_transport": VIDEO_TRANSPORT_AUTO,
@@ -571,6 +583,32 @@ class CaptionAttemptResult:
     @property
     def blocks_native_video(self) -> bool:
         return self.video_rejected or self.image_rejected
+
+
+@dataclass
+class MediaProbeInfo:
+    duration_seconds: float | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    frame_count: int | None = None
+
+
+@dataclass
+class FrameExtractionPlan:
+    fps_expr: str
+    frame_limit: int | None
+    mode: str
+    target_min_tokens: int | None = None
+    target_max_tokens: int | None = None
+    output_width: int | None = None
+    output_height: int | None = None
+    estimated_frame_tokens: int | None = None
+    estimated_total_tokens: int | None = None
+
+    def __iter__(self):
+        yield self.fps_expr
+        yield self.frame_limit
 
 
 class DirectCaptionProvider:
@@ -1323,26 +1361,80 @@ class Main(Star):
             return any(token in text for token in tokens)
         return False
 
+    def _looks_like_token_limit_error(self, exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        tokens = (
+            "token limit",
+            "context length",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "exceeded model token",
+            "exceeded token",
+            "请求超过",
+            "上下文",
+        )
+        return any(token in text for token in tokens)
+
     def _get_ffmpeg_command(self) -> str:
         return str(self.config.get("ffmpeg_path", "") or "").strip() or "ffmpeg"
 
     def _get_ffprobe_command(self) -> str:
         return str(self.config.get("ffprobe_path", "") or "").strip() or "ffprobe"
 
-    def _probe_media_duration_seconds(self, local_path: str) -> float | None:
+    @staticmethod
+    def _parse_frame_rate(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text or text == "0/0":
+            return None
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            try:
+                denominator_value = float(denominator)
+                if denominator_value == 0:
+                    return None
+                value = float(numerator) / denominator_value
+            except ValueError:
+                return None
+        else:
+            try:
+                value = float(text)
+            except ValueError:
+                return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _optional_positive_float(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    @staticmethod
+    def _optional_positive_int(value: Any) -> int | None:
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    def _probe_media_info(self, local_path: str) -> MediaProbeInfo:
         ffprobe_cmd = self._get_ffprobe_command()
         if shutil.which(ffprobe_cmd) is None and not os.path.exists(ffprobe_cmd):
-            return None
+            return MediaProbeInfo()
         try:
             proc = subprocess.run(
                 [
                     ffprobe_cmd,
                     "-v",
                     "error",
+                    "-select_streams",
+                    "v:0",
                     "-show_entries",
-                    "format=duration",
+                    "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration",
                     "-of",
-                    "default=noprint_wrappers=1:nokey=1",
+                    "json",
                     local_path,
                 ],
                 check=True,
@@ -1350,15 +1442,35 @@ class Main(Star):
                 text=True,
             )
         except Exception:
-            return None
-        value = str(proc.stdout or "").strip()
-        if not value:
-            return None
+            return MediaProbeInfo()
         try:
-            duration = float(value)
-        except ValueError:
-            return None
-        return duration if duration > 0 else None
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            return MediaProbeInfo()
+
+        streams = payload.get("streams") or []
+        stream = streams[0] if streams else {}
+        duration_seconds = self._optional_positive_float(stream.get("duration"))
+        if duration_seconds is None:
+            duration_seconds = self._optional_positive_float(
+                (payload.get("format") or {}).get("duration")
+            )
+        fps = self._parse_frame_rate(stream.get("avg_frame_rate"))
+        if fps is None:
+            fps = self._parse_frame_rate(stream.get("r_frame_rate"))
+        frame_count = self._optional_positive_int(stream.get("nb_frames"))
+        if frame_count is None and duration_seconds and fps:
+            frame_count = max(1, math.ceil(duration_seconds * fps))
+        return MediaProbeInfo(
+            duration_seconds=duration_seconds,
+            width=self._optional_positive_int(stream.get("width")),
+            height=self._optional_positive_int(stream.get("height")),
+            fps=fps,
+            frame_count=frame_count,
+        )
+
+    def _probe_media_duration_seconds(self, local_path: str) -> float | None:
+        return self._probe_media_info(local_path).duration_seconds
 
     def _extract_frame_data_urls_sync(
         self,
@@ -1367,12 +1479,14 @@ class Main(Star):
     ) -> list[str]:
         ffmpeg_cmd = self._get_ffmpeg_command()
         if shutil.which(ffmpeg_cmd) is None and not os.path.exists(ffmpeg_cmd):
-            raise FileNotFoundError(f"ffmpeg not found: {ffmpeg_cmd}")
+            raise FileNotFoundError(f"未找到 ffmpeg：{ffmpeg_cmd}")
 
-        duration_seconds = self._probe_media_duration_seconds(local_path)
-        fps_expr, frame_limit = self._resolve_frame_extraction_params(
-            duration_seconds=duration_seconds
+        probe_info = self._probe_media_info(local_path)
+        plan = self._resolve_frame_extraction_params(
+            duration_seconds=probe_info.duration_seconds,
+            probe_info=probe_info,
         )
+        self._log_frame_extraction_plan(local_path, probe_info, plan)
 
         with tempfile.TemporaryDirectory(prefix="video_ref_frames_") as tmp_dir:
             output_pattern = os.path.join(tmp_dir, "frame_%03d.jpg")
@@ -1385,24 +1499,43 @@ class Main(Star):
                 "-i",
                 local_path,
                 "-vf",
-                f"fps={fps_expr}",
+                self._build_ffmpeg_frame_filter(plan),
             ]
-            if frame_limit is not None:
-                command.extend(["-frames:v", str(frame_limit)])
+            if plan.frame_limit is not None:
+                command.extend(["-frames:v", str(plan.frame_limit)])
+            command.extend(["-q:v", "5"])
             command.append(output_pattern)
             subprocess.run(command, check=True, capture_output=True, text=True)
             frame_files = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.jpg")))
-            return [_file_to_data_url(path, mime_hint="image/jpeg") for path in frame_files]
+            frame_refs = [
+                _file_to_data_url(path, mime_hint="image/jpeg") for path in frame_files
+            ]
+            actual_tokens = self._estimate_data_url_tokens(frame_refs)
+            actual_size_bytes = sum(len(item.encode("utf-8")) for item in frame_refs)
+            logger.info(
+                "video-reference-vision: 抽帧完成：实际抽帧=%d，data URL 总大小=%.2fMB，按请求体保守估算 token≈%s；临时帧目录已自动清理",
+                len(frame_refs),
+                actual_size_bytes / 1024 / 1024,
+                self._format_optional_int(actual_tokens),
+            )
+            return frame_refs
 
     def _resolve_frame_extraction_params(
         self,
         *,
         duration_seconds: float | None,
-    ) -> tuple[str, int | None]:
+        probe_info: MediaProbeInfo | None = None,
+    ) -> FrameExtractionPlan:
         frame_mode = str(
-            self.config.get("video_caption_frame_mode", "count") or "count"
+            self.config.get("video_caption_frame_mode", FRAME_MODE_AUTO) or FRAME_MODE_AUTO
         ).strip().lower()
-        if frame_mode == "fps":
+        if frame_mode == FRAME_MODE_AUTO:
+            return self._resolve_auto_frame_extraction_params(
+                duration_seconds=duration_seconds,
+                probe_info=probe_info or MediaProbeInfo(duration_seconds=duration_seconds),
+            )
+
+        if frame_mode == FRAME_MODE_FPS:
             frame_fps = max(
                 0.1,
                 float(self.config.get("video_caption_frame_fps", 1.0) or 1.0),
@@ -1410,14 +1543,241 @@ class Main(Star):
             frame_limit: int | None = None
             if duration_seconds and duration_seconds > 0:
                 frame_limit = max(1, math.ceil(duration_seconds * frame_fps))
-            return f"{frame_fps:.6f}", frame_limit
+            return FrameExtractionPlan(
+                fps_expr=f"{frame_fps:.6f}",
+                frame_limit=frame_limit,
+                mode=FRAME_MODE_FPS,
+            )
 
         frame_count = max(1, int(self.config.get("video_caption_frame_count", 4)))
         fps_expr = "1"
         if duration_seconds and duration_seconds > 0:
-            fps_value = max(frame_count / max(duration_seconds, 1.0), 0.1)
+            fps_value = max(frame_count / max(duration_seconds, 1.0), 0.001)
             fps_expr = f"{fps_value:.6f}"
-        return fps_expr, frame_count
+        return FrameExtractionPlan(
+            fps_expr=fps_expr,
+            frame_limit=frame_count,
+            mode=FRAME_MODE_COUNT,
+        )
+
+    def _resolve_auto_frame_extraction_params(
+        self,
+        *,
+        duration_seconds: float | None,
+        probe_info: MediaProbeInfo,
+    ) -> FrameExtractionPlan:
+        min_context_tokens = self._config_context_tokens(
+            "video_caption_frame_auto_min_context_k",
+            150,
+        )
+        max_context_tokens = self._config_context_tokens(
+            "video_caption_frame_auto_max_context_k",
+            200,
+        )
+        if min_context_tokens > max_context_tokens:
+            min_context_tokens, max_context_tokens = (
+                max_context_tokens,
+                min_context_tokens,
+            )
+
+        desired_frame_count = self._resolve_auto_desired_frame_count(probe_info)
+        budget_for_frames = max(max_context_tokens - AUTO_FRAME_TEXT_TOKENS, 1000)
+        target_frame_tokens = max(
+            AUTO_FRAME_MIN_FRAME_TOKENS,
+            budget_for_frames // max(desired_frame_count, 1),
+        )
+        scaled_probe_info = self._scale_probe_to_token_budget(
+            probe_info,
+            target_frame_tokens=target_frame_tokens,
+        )
+        estimated_frame_tokens = self._estimate_frame_tokens(scaled_probe_info)
+        frame_count = max(1, budget_for_frames // max(estimated_frame_tokens, 1))
+        frame_count = min(frame_count, desired_frame_count)
+        if probe_info.frame_count:
+            frame_count = min(frame_count, max(1, probe_info.frame_count))
+
+        fps_expr = "1"
+        if duration_seconds and duration_seconds > 0:
+            fps_value = max(frame_count / max(duration_seconds, 1.0), 0.001)
+            if probe_info.fps:
+                fps_value = min(fps_value, probe_info.fps)
+            fps_expr = f"{fps_value:.6f}"
+
+        return FrameExtractionPlan(
+            fps_expr=fps_expr,
+            frame_limit=frame_count,
+            mode=FRAME_MODE_AUTO,
+            target_min_tokens=min_context_tokens,
+            target_max_tokens=max_context_tokens,
+            output_width=(
+                scaled_probe_info.width
+                if scaled_probe_info.width != probe_info.width
+                or scaled_probe_info.height != probe_info.height
+                else None
+            ),
+            output_height=(
+                scaled_probe_info.height
+                if scaled_probe_info.width != probe_info.width
+                or scaled_probe_info.height != probe_info.height
+                else None
+            ),
+            estimated_frame_tokens=estimated_frame_tokens,
+            estimated_total_tokens=(estimated_frame_tokens * frame_count)
+            + AUTO_FRAME_TEXT_TOKENS,
+        )
+
+    def _resolve_auto_desired_frame_count(self, probe_info: MediaProbeInfo) -> int:
+        duration_seconds = probe_info.duration_seconds
+        if duration_seconds and duration_seconds > 0:
+            if duration_seconds <= 10:
+                sample_fps = 2.0
+            elif duration_seconds <= 30:
+                sample_fps = 1.0
+            elif duration_seconds <= 120:
+                sample_fps = 0.35
+            elif duration_seconds <= 600:
+                sample_fps = 0.12
+            else:
+                sample_fps = 0.04
+            desired_count = math.ceil(duration_seconds * sample_fps)
+        else:
+            desired_count = 4
+
+        desired_count = max(1, min(desired_count, AUTO_FRAME_MAX_FRAMES))
+        if probe_info.frame_count:
+            desired_count = min(desired_count, max(1, probe_info.frame_count))
+        return desired_count
+
+    def _scale_probe_to_token_budget(
+        self,
+        probe_info: MediaProbeInfo,
+        *,
+        target_frame_tokens: int,
+    ) -> MediaProbeInfo:
+        if not probe_info.width or not probe_info.height:
+            return probe_info
+        current_tokens = self._estimate_frame_tokens(probe_info)
+        if current_tokens <= target_frame_tokens:
+            return probe_info
+
+        scale = math.sqrt(max(target_frame_tokens, 1) / max(current_tokens, 1))
+        width = self._even_dimension(math.floor(probe_info.width * scale))
+        height = self._even_dimension(math.floor(probe_info.height * scale))
+        width = min(width, probe_info.width)
+        height = min(height, probe_info.height)
+
+        scaled_probe_info = MediaProbeInfo(
+            duration_seconds=probe_info.duration_seconds,
+            width=width,
+            height=height,
+            fps=probe_info.fps,
+            frame_count=probe_info.frame_count,
+        )
+        while (
+            width > 2
+            and height > 2
+            and self._estimate_frame_tokens(scaled_probe_info) > target_frame_tokens
+        ):
+            width = self._even_dimension(math.floor(width * 0.95))
+            height = self._even_dimension(math.floor(height * 0.95))
+            scaled_probe_info.width = width
+            scaled_probe_info.height = height
+        return scaled_probe_info
+
+    @staticmethod
+    def _even_dimension(value: int) -> int:
+        dimension = max(2, int(value))
+        if dimension % 2:
+            dimension -= 1
+        return max(2, dimension)
+
+    @staticmethod
+    def _build_ffmpeg_frame_filter(plan: FrameExtractionPlan) -> str:
+        filters = [f"fps={plan.fps_expr}"]
+        if plan.output_width and plan.output_height:
+            filters.append(
+                f"scale={plan.output_width}:{plan.output_height}:flags=lanczos"
+            )
+        return ",".join(filters)
+
+    def _config_context_tokens(self, key: str, default_k: int) -> int:
+        try:
+            value_k = int(float(self.config.get(key, default_k) or default_k))
+        except (TypeError, ValueError):
+            value_k = default_k
+        return max(1, value_k) * 1000
+
+    def _estimate_frame_tokens(self, probe_info: MediaProbeInfo) -> int:
+        if not probe_info.width or not probe_info.height:
+            return AUTO_FRAME_DEFAULT_TOKENS
+        pixel_count = max(1, probe_info.width * probe_info.height)
+        estimated_jpeg_bytes = max(
+            4096,
+            int(pixel_count * AUTO_FRAME_JPEG_BYTES_PER_PIXEL),
+        )
+        base64_chars = math.ceil(estimated_jpeg_bytes * 4 / 3)
+        request_tokens = math.ceil(base64_chars / AUTO_FRAME_BASE64_CHARS_PER_TOKEN)
+        vision_tiles = math.ceil(probe_info.width / 512) * math.ceil(
+            probe_info.height / 512
+        )
+        vision_tokens = 85 + (170 * max(1, vision_tiles))
+        return max(request_tokens, vision_tokens)
+
+    @staticmethod
+    def _estimate_data_url_tokens(data_urls: list[str]) -> int:
+        return math.ceil(
+            sum(len(item) for item in data_urls) / AUTO_FRAME_BASE64_CHARS_PER_TOKEN
+        )
+
+    @staticmethod
+    def _format_optional_float(value: float | None, *, suffix: str = "") -> str:
+        if value is None:
+            return "未知"
+        return f"{value:.2f}{suffix}"
+
+    @staticmethod
+    def _format_optional_int(value: int | None, *, suffix: str = "") -> str:
+        if value is None:
+            return "未知"
+        return f"{value}{suffix}"
+
+    @staticmethod
+    def _format_resolution(probe_info: MediaProbeInfo) -> str:
+        if not probe_info.width or not probe_info.height:
+            return "未知"
+        return f"{probe_info.width}x{probe_info.height}"
+
+    @staticmethod
+    def _format_output_resolution(plan: FrameExtractionPlan) -> str:
+        if not plan.output_width or not plan.output_height:
+            return "保持原分辨率"
+        return f"{plan.output_width}x{plan.output_height}"
+
+    def _log_frame_extraction_plan(
+        self,
+        local_path: str,
+        probe_info: MediaProbeInfo,
+        plan: FrameExtractionPlan,
+    ) -> None:
+        logger.info(
+            "video-reference-vision: 视频信息：文件=%s，分辨率=%s，帧率=%s，时长=%s，总帧数=%s",
+            os.path.basename(local_path),
+            self._format_resolution(probe_info),
+            self._format_optional_float(probe_info.fps, suffix="fps"),
+            self._format_optional_float(probe_info.duration_seconds, suffix="秒"),
+            self._format_optional_int(probe_info.frame_count),
+        )
+        logger.info(
+            "video-reference-vision: 抽帧计划：模式=%s，抽帧频率=%sfps，最多抽帧=%s，输出分辨率=%s，目标上下文=%s-%s token，预计单帧≈%s token，预计总消耗≈%s token",
+            plan.mode,
+            plan.fps_expr,
+            self._format_optional_int(plan.frame_limit),
+            self._format_output_resolution(plan),
+            self._format_optional_int(plan.target_min_tokens),
+            self._format_optional_int(plan.target_max_tokens),
+            self._format_optional_int(plan.estimated_frame_tokens),
+            self._format_optional_int(plan.estimated_total_tokens),
+        )
 
     async def _extract_frame_data_urls(self, media: SupportedMedia) -> list[str]:
         refs: list[str] = []
@@ -1470,6 +1830,55 @@ class Main(Star):
                     ).model_dump()
                 )
         return blocks
+
+    @staticmethod
+    def _select_evenly_spaced_blocks(
+        blocks: list[dict[str, Any]],
+        target_count: int,
+    ) -> list[dict[str, Any]]:
+        if target_count >= len(blocks):
+            return list(blocks)
+        if target_count <= 1:
+            return [blocks[0]]
+        selected: list[dict[str, Any]] = []
+        used_indices: set[int] = set()
+        last_index = len(blocks) - 1
+        for step in range(target_count):
+            index = round(step * last_index / (target_count - 1))
+            if index in used_indices:
+                continue
+            selected.append(blocks[index])
+            used_indices.add(index)
+        return selected
+
+    @staticmethod
+    def _build_frame_caption_contexts(
+        *,
+        prompt_text: str,
+        frame_blocks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{prompt_text}\n\n"
+                            "如果原生视频输入不可用，请根据这些抽帧图片推断视频内容。"
+                        ),
+                    },
+                    *frame_blocks,
+                ],
+            }
+        ]
+
+    def _build_reduced_frame_blocks_for_retry(
+        self,
+        frame_blocks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        target_count = max(1, len(frame_blocks) // 2)
+        return self._select_evenly_spaced_blocks(frame_blocks, target_count)
 
     async def _summarize_media_with_provider(
         self,
@@ -1533,31 +1942,43 @@ class Main(Star):
         if not frame_blocks:
             return result
 
-        contexts = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"{self._build_video_caption_prompt(user_question)}\n\n"
-                            "If direct video input is unavailable, infer the answer from the extracted key frames."
-                        ),
-                    },
-                    *frame_blocks,
-                ],
-            }
-        ]
-        try:
-            llm_resp = await provider.text_chat(contexts=contexts)
-        except Exception as exc:  # noqa: BLE001
-            if self._looks_like_rejected_media_error(exc, media_kind="image"):
-                result.image_rejected = True
-            logger.warning(
-                "video-reference-vision: 抽帧转述请求失败：%s",
-                exc,
+        prompt_text = self._build_video_caption_prompt(user_question)
+        current_frame_blocks = frame_blocks
+        attempt = 1
+        while True:
+            contexts = self._build_frame_caption_contexts(
+                prompt_text=prompt_text,
+                frame_blocks=current_frame_blocks,
             )
-            return result
+            try:
+                llm_resp = await provider.text_chat(contexts=contexts)
+            except Exception as exc:  # noqa: BLE001
+                if (
+                    self._looks_like_token_limit_error(exc)
+                    and len(current_frame_blocks) > 1
+                ):
+                    reduced_frame_blocks = self._build_reduced_frame_blocks_for_retry(
+                        current_frame_blocks
+                    )
+                    if len(reduced_frame_blocks) < len(current_frame_blocks):
+                        logger.warning(
+                            "video-reference-vision: 抽帧转述触发 token 上限，自动减少帧数后重试：第 %d 次失败，当前帧数=%d，下次帧数=%d，错误=%s",
+                            attempt,
+                            len(current_frame_blocks),
+                            len(reduced_frame_blocks),
+                            exc,
+                        )
+                        current_frame_blocks = reduced_frame_blocks
+                        attempt += 1
+                        continue
+                if self._looks_like_rejected_media_error(exc, media_kind="image"):
+                    result.image_rejected = True
+                logger.warning(
+                    "video-reference-vision: 抽帧转述请求失败：%s",
+                    exc,
+                )
+                return result
+            break
 
         summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
         if not summary:
