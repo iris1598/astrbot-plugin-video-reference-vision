@@ -56,7 +56,6 @@ AUTO_FRAME_DEFAULT_TOKENS = 1200
 AUTO_FRAME_BASE64_CHARS_PER_TOKEN = 2.0
 AUTO_FRAME_TEXT_TOKENS = 3000
 AUTO_FRAME_MIN_FRAME_TOKENS = 800
-AUTO_FRAME_MAX_FRAMES = 80
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -1689,19 +1688,13 @@ class Main(Star):
                 min_context_tokens,
             )
 
-        desired_frame_count = self._resolve_auto_desired_frame_count(probe_info)
         budget_for_frames = max(max_context_tokens - AUTO_FRAME_TEXT_TOKENS, 1000)
-        target_frame_tokens = max(
-            AUTO_FRAME_MIN_FRAME_TOKENS,
-            budget_for_frames // max(desired_frame_count, 1),
-        )
         scaled_probe_info = self._scale_probe_to_token_budget(
             probe_info,
-            target_frame_tokens=target_frame_tokens,
+            target_frame_tokens=max(AUTO_FRAME_MIN_FRAME_TOKENS, budget_for_frames),
         )
         estimated_frame_tokens = self._estimate_frame_tokens(scaled_probe_info)
         frame_count = max(1, budget_for_frames // max(estimated_frame_tokens, 1))
-        frame_count = min(frame_count, desired_frame_count)
         if probe_info.frame_count:
             frame_count = min(frame_count, max(1, probe_info.frame_count))
 
@@ -1734,28 +1727,6 @@ class Main(Star):
             estimated_total_tokens=(estimated_frame_tokens * frame_count)
             + AUTO_FRAME_TEXT_TOKENS,
         )
-
-    def _resolve_auto_desired_frame_count(self, probe_info: MediaProbeInfo) -> int:
-        duration_seconds = probe_info.duration_seconds
-        if duration_seconds and duration_seconds > 0:
-            if duration_seconds <= 10:
-                sample_fps = 2.0
-            elif duration_seconds <= 30:
-                sample_fps = 1.0
-            elif duration_seconds <= 120:
-                sample_fps = 0.35
-            elif duration_seconds <= 600:
-                sample_fps = 0.12
-            else:
-                sample_fps = 0.04
-            desired_count = math.ceil(duration_seconds * sample_fps)
-        else:
-            desired_count = 4
-
-        desired_count = max(1, min(desired_count, AUTO_FRAME_MAX_FRAMES))
-        if probe_info.frame_count:
-            desired_count = min(desired_count, max(1, probe_info.frame_count))
-        return desired_count
 
     def _scale_probe_to_token_budget(
         self,

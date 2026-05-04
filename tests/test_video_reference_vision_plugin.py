@@ -996,8 +996,8 @@ def test_resolve_frame_extraction_params_auto_mode_uses_context_budget():
     )
 
     assert plan.mode == "auto"
-    assert plan.frame_limit == 20
-    assert plan.fps_expr == "2.000000"
+    assert plan.frame_limit == 164
+    assert plan.fps_expr == "16.400000"
     assert plan.output_width is None
     assert plan.output_height is None
     assert plan.target_min_tokens == 150000
@@ -1029,11 +1029,11 @@ def test_resolve_frame_extraction_params_auto_mode_caps_high_resolution_frames()
     )
 
     assert plan.mode == "auto"
-    assert plan.frame_limit == 20
+    assert plan.frame_limit == 92
     assert plan.output_width is None
     assert plan.output_height is None
     assert plan.estimated_total_tokens <= 200000
-    assert plugin._build_ffmpeg_frame_filter(plan) == "fps=2.000000"
+    assert plugin._build_ffmpeg_frame_filter(plan) == "fps=9.200000"
 
 
 @pytest.mark.asyncio
