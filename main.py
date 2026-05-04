@@ -42,6 +42,7 @@ VIDEO_TRANSPORT_AUTO = "auto"
 VIDEO_TRANSPORT_GENERIC = "generic"
 VIDEO_TRANSPORT_KIMI_MOONSHOT = "moonshot"
 VIDEO_TRANSPORT_KIMI_KIMICODE = "kimicode"
+KIMI_CODE_MODEL_ID = "kimi-for-coding"
 KIMI_VIDEO_TRANSPORTS = {
     VIDEO_TRANSPORT_KIMI_MOONSHOT,
     VIDEO_TRANSPORT_KIMI_KIMICODE,
@@ -104,6 +105,10 @@ class VideoURLPart(ContentPart):
     fps: float | None = None
 
 
+class KimiFileObject(BaseModel):
+    id: str
+
+
 def _normalized_message_id(value: Any) -> str:
     return str(value or "").strip()
 
@@ -142,6 +147,30 @@ def _normalize_video_transport(value: Any) -> str:
     }:
         return transport
     return VIDEO_TRANSPORT_AUTO
+
+
+def _is_kimicode_api_base(value: Any) -> bool:
+    return "api.kimi.com/coding" in str(value or "").strip().lower()
+
+
+def _uses_kimicode_transport(*, transport: str, api_base: Any) -> bool:
+    normalized_transport = _normalize_video_transport(transport)
+    if normalized_transport == VIDEO_TRANSPORT_KIMI_KIMICODE:
+        return True
+    if normalized_transport == VIDEO_TRANSPORT_AUTO and _is_kimicode_api_base(api_base):
+        return True
+    return False
+
+
+def _normalize_direct_caption_model(
+    *,
+    transport: str,
+    api_base: Any,
+    model: Any,
+) -> str:
+    if _uses_kimicode_transport(transport=transport, api_base=api_base):
+        return KIMI_CODE_MODEL_ID
+    return str(model or "").strip()
 
 
 def _ascii_header_value(value: Any, *, fallback: str = "unknown") -> str:
@@ -309,6 +338,11 @@ def _guess_mime(path: str) -> str:
     if mime_type and (mime_type.startswith("video/") or mime_type == "image/gif"):
         return mime_type
     return "video/mp4"
+
+
+def _guess_kimi_upload_filename(mime_type: str) -> str:
+    extension = mimetypes.guess_extension(mime_type) or ".bin"
+    return f"upload{extension}"
 
 
 def _file_to_data_url(path: str, *, mime_hint: str | None = None) -> str:
@@ -542,11 +576,16 @@ class DirectCaptionProvider:
     ) -> None:
         normalized_transport = _normalize_video_transport(transport)
         normalized_api_base = _normalize_openai_base_url(api_base)
+        normalized_model = _normalize_direct_caption_model(
+            transport=normalized_transport,
+            api_base=normalized_api_base,
+            model=model,
+        )
         self.provider_config = {
             "id": provider_id,
             "provider": "openai_chat_completion",
             "api_base": normalized_api_base,
-            "model": model,
+            "model": normalized_model,
             "video_transport": normalized_transport,
             "model_metadata": {
                 "modalities": {
@@ -556,7 +595,7 @@ class DirectCaptionProvider:
             },
         }
         self._api_key = api_key
-        self._model = model
+        self._model = normalized_model
         self._timeout_seconds = max(10, int(timeout_seconds))
 
     def get_model(self) -> str:
@@ -662,18 +701,24 @@ class Main(Star):
         )
 
     def _get_direct_caption_provider_config(self) -> dict[str, Any]:
+        transport = _normalize_video_transport(
+            self.config.get("video_caption_direct_transport", VIDEO_TRANSPORT_AUTO)
+        )
+        api_base = _normalize_openai_base_url(
+            self.config.get("video_caption_direct_base_url", "")
+        )
         return {
             "enabled": bool(self.config.get("video_caption_direct_enabled", False)),
-            "transport": _normalize_video_transport(
-                self.config.get("video_caption_direct_transport", VIDEO_TRANSPORT_AUTO)
-            ),
-            "api_base": str(
-                self.config.get("video_caption_direct_base_url", "") or ""
-            ).strip(),
+            "transport": transport,
+            "api_base": api_base,
             "api_key": str(
                 self.config.get("video_caption_direct_api_key", "") or ""
             ).strip(),
-            "model": str(self.config.get("video_caption_direct_model", "") or "").strip(),
+            "model": _normalize_direct_caption_model(
+                transport=transport,
+                api_base=api_base,
+                model=self.config.get("video_caption_direct_model", ""),
+            ),
             "timeout_seconds": int(
                 self.config.get("video_caption_direct_timeout_seconds", 120)
             ),
@@ -688,9 +733,11 @@ class Main(Star):
         missing: list[str] = []
         if require_enabled and not direct_config["enabled"]:
             missing.append("video_caption_direct_enabled")
-        for key in ("api_base", "api_key", "model"):
+        for key in ("api_base", "api_key"):
             if not direct_config[key]:
                 missing.append(f"video_caption_direct_{key}")
+        if not direct_config["model"]:
+            missing.append("video_caption_direct_model")
         return missing
 
     def _build_direct_caption_provider(
@@ -1607,7 +1654,11 @@ class Main(Star):
             return "upload"
         if kimi_strategy == "base64":
             return "base64"
-        if _provider_video_transport(provider) == VIDEO_TRANSPORT_KIMI_KIMICODE:
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        if _uses_kimicode_transport(
+            transport=_provider_video_transport(provider),
+            api_base=provider_config.get("api_base", ""),
+        ):
             return "upload"
         max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
         if size_bytes is None:
@@ -1745,7 +1796,20 @@ class Main(Star):
                 base_url=api_base,
                 default_headers=default_headers or None,
             )
-            file_obj = await client.files.create(file=Path(local_path), purpose="video")
+            mime_type = _guess_mime(local_path)
+            file_obj = await client.post(
+                "/files",
+                cast_to=KimiFileObject,
+                body={"purpose": "video"},
+                files={
+                    "file": (
+                        _guess_kimi_upload_filename(mime_type),
+                        Path(local_path).read_bytes(),
+                        mime_type,
+                    )
+                },
+                options={"headers": {"Content-Type": "multipart/form-data"}},
+            )
             file_id = str(getattr(file_obj, "id", "") or "")
             if not file_id:
                 logger.warning("video-reference-vision: Kimi upload returned empty file id")

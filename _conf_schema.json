@@ -172,7 +172,7 @@
   "video_caption_direct_model": {
     "type": "string",
     "description": "独立转述模型 ID",
-    "hint": "独立视频转述模型的模型名或模型 ID。只影响插件内部的视频转述，不影响 AstrBot 主聊天模型。",
+    "hint": "独立视频转述模型的模型名或模型 ID。Kimi Code 传输方式会按官方要求自动使用 `kimi-for-coding`，此项可留空或忽略。只影响插件内部的视频转述，不影响 AstrBot 主聊天模型。",
     "default": ""
   },
   "video_caption_direct_timeout_seconds": {

@@ -481,17 +481,22 @@ async def test_kimi_auto_uploads_oversized_local_video(tmp_path: Path):
     )
     req = ProviderRequest(prompt="read this video")
 
-    class FakeFiles:
-        async def create(self, file, purpose):
-            assert purpose == "video"
-            return SimpleNamespace(id="file_test_oversize")
-
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url, default_headers=None):
             assert api_key == "k_test_key"
             assert base_url.startswith("https://api.moonshot.cn")
             assert default_headers is None
-            self.files = FakeFiles()
+
+        async def post(self, path, cast_to, body, files, options):
+            assert path == "/files"
+            assert cast_to is plugin_module.KimiFileObject
+            assert body == {"purpose": "video"}
+            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
+            filename, data, mime_type = files["file"]
+            assert filename == "upload.mp4"
+            assert data == video_file.read_bytes()
+            assert mime_type == "video/mp4"
+            return SimpleNamespace(id="file_test_oversize")
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
         await plugin.inject_quoted_video(event, req)
@@ -537,16 +542,20 @@ async def test_kimi_explicit_upload_overrides_public_url(tmp_path: Path):
     )
     req = ProviderRequest(prompt="read this remote video")
 
-    class FakeFiles:
-        async def create(self, file, purpose):
-            assert Path(file) == local_video
-            assert purpose == "video"
-            return SimpleNamespace(id="file_test_remote_upload")
-
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url, default_headers=None):
             assert default_headers is None
-            self.files = FakeFiles()
+
+        async def post(self, path, cast_to, body, files, options):
+            assert path == "/files"
+            assert cast_to is plugin_module.KimiFileObject
+            assert body == {"purpose": "video"}
+            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
+            filename, data, mime_type = files["file"]
+            assert filename == "upload.mp4"
+            assert data == local_video.read_bytes()
+            assert mime_type == "video/mp4"
+            return SimpleNamespace(id="file_test_remote_upload")
 
     with patch.object(Video, "convert_to_file_path", fake_convert_to_file_path), patch(
         "openai.AsyncOpenAI", FakeAsyncOpenAI
@@ -648,18 +657,23 @@ async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
     )
     req = ProviderRequest(prompt="read this video")
 
-    class FakeFiles:
-        async def create(self, file, purpose):
-            assert purpose == "video"
-            return SimpleNamespace(id="file_test_kimicode")
-
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url, default_headers=None):
             assert api_key == "kc_test_key"
             assert base_url == "https://api.kimi.com/coding/v1"
             assert default_headers is not None
             assert default_headers["X-Msh-Platform"] == "kimi_cli"
-            self.files = FakeFiles()
+
+        async def post(self, path, cast_to, body, files, options):
+            assert path == "/files"
+            assert cast_to is plugin_module.KimiFileObject
+            assert body == {"purpose": "video"}
+            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
+            filename, data, mime_type = files["file"]
+            assert filename == "upload.mp4"
+            assert data == video_file.read_bytes()
+            assert mime_type == "video/mp4"
+            return SimpleNamespace(id="file_test_kimicode")
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
         await plugin.inject_quoted_video(event, req)
@@ -696,11 +710,7 @@ async def test_kimicode_transport_auto_uses_upload_for_small_local_video(tmp_pat
 
     provider = plugin._build_direct_caption_provider()
     assert provider is not None
-
-    class FakeFiles:
-        async def create(self, file, purpose):
-            assert purpose == "video"
-            return SimpleNamespace(id="file_test_direct_kimicode_small")
+    assert provider.get_model() == plugin_module.KIMI_CODE_MODEL_ID
 
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url, default_headers=None):
@@ -708,7 +718,17 @@ async def test_kimicode_transport_auto_uses_upload_for_small_local_video(tmp_pat
             assert base_url == "https://api.kimi.com/coding/v1"
             assert default_headers is not None
             assert default_headers["X-Msh-Platform"] == "kimi_cli"
-            self.files = FakeFiles()
+
+        async def post(self, path, cast_to, body, files, options):
+            assert path == "/files"
+            assert cast_to is plugin_module.KimiFileObject
+            assert body == {"purpose": "video"}
+            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
+            filename, data, mime_type = files["file"]
+            assert filename == "upload.mp4"
+            assert data == video_file.read_bytes()
+            assert mime_type == "video/mp4"
+            return SimpleNamespace(id="file_test_direct_kimicode_small")
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
         part = await plugin._build_video_part(
@@ -747,12 +767,8 @@ async def test_direct_transport_kimicode_forces_kimi_upload_on_custom_base(tmp_p
 
     provider = plugin._build_direct_caption_provider()
     assert provider is not None
+    assert provider.get_model() == plugin_module.KIMI_CODE_MODEL_ID
     assert detect_video_strategy(provider, mode="force") == "kimi"
-
-    class FakeFiles:
-        async def create(self, file, purpose):
-            assert purpose == "video"
-            return SimpleNamespace(id="file_test_direct_kimicode")
 
     class FakeAsyncOpenAI:
         def __init__(self, api_key, base_url, default_headers=None):
@@ -760,7 +776,17 @@ async def test_direct_transport_kimicode_forces_kimi_upload_on_custom_base(tmp_p
             assert base_url == "https://proxy.example.com/v1"
             assert default_headers is not None
             assert default_headers["X-Msh-Platform"] == "kimi_cli"
-            self.files = FakeFiles()
+
+        async def post(self, path, cast_to, body, files, options):
+            assert path == "/files"
+            assert cast_to is plugin_module.KimiFileObject
+            assert body == {"purpose": "video"}
+            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
+            filename, data, mime_type = files["file"]
+            assert filename == "upload.mp4"
+            assert data == video_file.read_bytes()
+            assert mime_type == "video/mp4"
+            return SimpleNamespace(id="file_test_direct_kimicode")
 
     with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
         part = await plugin._build_video_part(
@@ -786,6 +812,27 @@ def test_direct_transport_generic_disables_kimi_transport_override():
     assert detect_video_strategy(provider, mode="force") == "generic"
 
 
+def test_direct_kimicode_model_is_optional_and_normalized():
+    provider = DummyProvider(
+        {"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text-only-model"}
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "video_caption_direct_enabled": True,
+            "video_caption_direct_transport": "auto",
+            "video_caption_direct_base_url": "https://api.kimi.com/coding/v1",
+            "video_caption_direct_api_key": "direct_test_key",
+            "video_caption_direct_model": "",
+        },
+    )
+
+    direct_provider = plugin._build_direct_caption_provider()
+
+    assert direct_provider is not None
+    assert direct_provider.get_model() == plugin_module.KIMI_CODE_MODEL_ID
+
+
 @pytest.mark.asyncio
 async def test_direct_kimicode_text_chat_uses_kimi_compat_headers():
     provider = plugin_module.DirectCaptionProvider(
@@ -796,10 +843,11 @@ async def test_direct_kimicode_text_chat_uses_kimi_compat_headers():
         model="kimi-k2.6",
         timeout_seconds=30,
     )
+    assert provider.get_model() == plugin_module.KIMI_CODE_MODEL_ID
 
     class FakeCompletions:
         async def create(self, **kwargs):
-            del kwargs
+            assert kwargs["model"] == plugin_module.KIMI_CODE_MODEL_ID
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     class FakeChat:

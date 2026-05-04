@@ -184,7 +184,7 @@ README.md
 - `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
 - `video_caption_direct_enabled`：启用插件内独立视频转述通道。
 - `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` / `kimicode` 会强制按 Kimi 视频输入链路处理，`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
-- `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。
+- `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。选择 `kimicode` 时，插件会按 Kimi Code 官方约定自动使用 `kimi-for-coding`，模型输入框可留空或忽略。
 - `video_caption_prompt`：发给视频转述模型的提示词。
 - `video_caption_use_current_question`：转述时是否带上用户当前问题。
 
@@ -211,6 +211,7 @@ README.md
 - `kimi_strategy=base64`：强制本地转 base64。
 - `kimi_upload_on_oversize=true`：视频超过 base64 限制时，自动改走上传模式。
 - `kimi_api_base`：可选覆盖 Kimi 接口地址。
+- `kimicode` 传输方式会复用 Kimi CLI 的轻量上传逻辑：先把本地视频以 `purpose=video` 上传到 `/files`，再用返回的 `ms://file_id` 发给聊天接口。
 
 ### GIF
 
