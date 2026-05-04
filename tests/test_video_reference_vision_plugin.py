@@ -965,7 +965,7 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
     )
     assert not any(part.get("type") == "video_url" for part in rewritten)
     mock_logger_info.assert_any_call(
-        "video-reference-vision: caption summary: %s",
+        "video-reference-vision: 视频转述结果：%s",
         "视频里有人在演示插件配置页面。",
     )
 

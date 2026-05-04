@@ -929,13 +929,13 @@ class Main(Star):
         )
         if not _provider_allowed(current_provider, current_strategy, self.config):
             logger.info(
-                "video-reference-vision: skip, provider filtered by allow/deny list"
+                "video-reference-vision: 已跳过，当前提供商被允许/拒绝列表过滤"
             )
             return
 
         if self._should_intercept_direct_video_request(event):
             logger.info(
-                "video-reference-vision: intercepted direct non-quoted video request"
+                "video-reference-vision: 已拦截直接发送的非引用视频请求"
             )
             event.stop_event()
             return
@@ -969,7 +969,7 @@ class Main(Star):
             )
             if caption_result.summary_text:
                 logger.info(
-                    "video-reference-vision: caption summary: %s",
+                    "video-reference-vision: 视频转述结果：%s",
                     caption_result.summary_text,
                 )
                 await self._rewrite_request_with_caption_text(
@@ -986,7 +986,7 @@ class Main(Star):
                         list(req.extra_user_content_parts or [])
                     )
                 logger.info(
-                    "video-reference-vision: current provider rejected media caption input, skip native video injection"
+                    "video-reference-vision: 当前提供商拒绝媒体转述输入，跳过原生视频注入"
                 )
                 return
             if _is_direct_caption_provider(caption_provider):
@@ -995,7 +995,7 @@ class Main(Star):
                         list(req.extra_user_content_parts or [])
                     )
                 logger.info(
-                    "video-reference-vision: direct caption provider did not produce summary, skip native video injection"
+                    "video-reference-vision: 独立转述提供商未生成摘要，跳过原生视频注入"
                 )
                 return
 
@@ -1004,7 +1004,7 @@ class Main(Star):
                 req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
                     list(req.extra_user_content_parts or [])
                 )
-            logger.debug("video-reference-vision: skip, provider strategy not matched")
+            logger.debug("video-reference-vision: 已跳过，当前提供商策略不匹配")
             return
 
         if _is_kimicode_provider(current_provider, strategy=current_strategy):
@@ -1013,7 +1013,7 @@ class Main(Star):
                     list(req.extra_user_content_parts or [])
                 )
             logger.info(
-                "video-reference-vision: skip native video injection for Kimi Code transport"
+                "video-reference-vision: Kimi Code 传输方式跳过原生视频注入"
             )
             return
 
@@ -1023,7 +1023,7 @@ class Main(Star):
                     list(req.extra_user_content_parts or [])
                 )
             logger.info(
-                "video-reference-vision: native video injection fallback disabled"
+                "video-reference-vision: 原生视频注入兜底已禁用"
             )
             return
 
@@ -1080,7 +1080,7 @@ class Main(Star):
                 require_enabled=True
             )
             logger.warning(
-                "video-reference-vision: direct caption provider config incomplete: %s",
+                "video-reference-vision: 独立视频转述提供商配置不完整：%s",
                 ", ".join(missing_keys),
             )
 
@@ -1095,7 +1095,7 @@ class Main(Star):
         provider = self.context.get_provider_by_id(provider_id)
         if provider is None:
             logger.warning(
-                "video-reference-vision: configured video caption provider not found: %s",
+                "video-reference-vision: 未找到已配置的视频转述提供商：%s",
                 provider_id,
             )
             return None, None, False
@@ -1109,12 +1109,12 @@ class Main(Star):
         )
         if strategy is None:
             logger.info(
-                "video-reference-vision: configured video caption provider has no native video strategy, will rely on frame fallback if possible: %s",
+                "video-reference-vision: 已配置的视频转述提供商不支持原生视频策略，如可用将依赖抽帧兜底：%s",
                 provider_id,
             )
         if not _provider_allowed(provider, strategy, self.config):
             logger.info(
-                "video-reference-vision: configured video caption provider filtered by allow/deny list: %s",
+                "video-reference-vision: 已配置的视频转述提供商被允许/拒绝列表过滤：%s",
                 provider_id,
             )
             return None, None, False
@@ -1171,7 +1171,7 @@ class Main(Star):
             result = await bot.call_action("get_file", file=file_ref)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "video-reference-vision: OneBot get_file failed for %s: %s",
+                "video-reference-vision: OneBot get_file 获取 %s 失败：%s",
                 file_ref,
                 exc,
             )
@@ -1215,7 +1215,7 @@ class Main(Star):
             payload = await bot.call_action("get_msg", message_id=int(reply_id))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "video-reference-vision: OneBot get_msg failed for reply_id=%s: %s",
+                "video-reference-vision: OneBot get_msg 获取 reply_id=%s 失败：%s",
                 reply_id,
                 exc,
             )
@@ -1229,7 +1229,7 @@ class Main(Star):
 
         if media:
             logger.info(
-                "video-reference-vision: resolved %d quoted video(s) via OneBot get_msg/get_file",
+                "video-reference-vision: 已通过 OneBot get_msg/get_file 解析到 %d 个引用视频",
                 len(media),
             )
         return media
@@ -1273,7 +1273,7 @@ class Main(Star):
                 normalized = _normalize_local_file_path(candidate.strip())
                 if normalized and os.path.exists(normalized):
                     logger.info(
-                        "video-reference-vision: fallback to media.path/local file after convert_to_file_path failed: %s",
+                        "video-reference-vision: convert_to_file_path 失败，回退到 media.path/本地文件：%s",
                         normalized,
                     )
                     return os.path.abspath(normalized)
@@ -1430,7 +1430,7 @@ class Main(Star):
             local_path = await self._resolve_media_local_path(media)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "video-reference-vision: failed to resolve local media path for frame fallback: %s",
+                "video-reference-vision: 为抽帧兜底解析本地媒体路径失败：%s",
                 exc,
             )
             return refs
@@ -1442,7 +1442,7 @@ class Main(Star):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "video-reference-vision: frame extraction failed: %s",
+                "video-reference-vision: 抽帧失败：%s",
                 exc,
             )
             return refs
@@ -1484,7 +1484,7 @@ class Main(Star):
 
         if prefer_frame_caption:
             logger.info(
-                "video-reference-vision: Kimi Code transport does not support native video parsing here, use frame caption first"
+                "video-reference-vision: Kimi Code 传输方式当前不支持原生视频解析，优先使用抽帧转述"
             )
         elif strategy:
             video_parts: list[dict] = []
@@ -1512,7 +1512,7 @@ class Main(Star):
                     if self._looks_like_rejected_media_error(exc, media_kind="video"):
                         result.video_rejected = True
                     logger.warning(
-                        "video-reference-vision: video caption request failed: %s",
+                        "video-reference-vision: 视频转述请求失败：%s",
                         exc,
                     )
                 else:
@@ -1521,7 +1521,7 @@ class Main(Star):
                         result.summary_text = summary
                         return result
                     logger.warning(
-                        "video-reference-vision: video caption provider returned empty text"
+                        "video-reference-vision: 视频转述提供商返回了空文本"
                     )
 
         if not prefer_frame_caption and not bool(
@@ -1554,14 +1554,14 @@ class Main(Star):
             if self._looks_like_rejected_media_error(exc, media_kind="image"):
                 result.image_rejected = True
             logger.warning(
-                "video-reference-vision: frame caption request failed: %s",
+                "video-reference-vision: 抽帧转述请求失败：%s",
                 exc,
             )
             return result
 
         summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
         if not summary:
-            logger.warning("video-reference-vision: frame caption provider returned empty text")
+            logger.warning("video-reference-vision: 抽帧转述提供商返回了空文本")
             return result
         result.summary_text = summary
         return result
@@ -1721,7 +1721,7 @@ class Main(Star):
             and not kimi_upload_supported
         ):
             logger.info(
-                "video-reference-vision: current Kimi-compatible endpoint does not expose file upload, fallback to local base64"
+                "video-reference-vision: 当前 Kimi 兼容端点未开放文件上传，回退到本地 base64"
             )
 
         if (
@@ -1733,25 +1733,25 @@ class Main(Star):
                 local_path = await self._resolve_media_local_path(media)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "video-reference-vision: failed to resolve local media path for Kimi upload: %s",
+                    "video-reference-vision: 为 Kimi 上传解析本地媒体路径失败：%s",
                     exc,
                 )
                 return None
-            logger.info("video-reference-vision: using Kimi upload mode")
+            logger.info("video-reference-vision: 使用 Kimi 上传模式")
             return await self._build_kimi_upload_video_part(
                 provider=provider,
                 local_path=local_path,
             )
 
         if prefer_public_url and _is_http_url(file_ref) and strategy != "kimi":
-            logger.info("video-reference-vision: using public media URL")
+            logger.info("video-reference-vision: 使用公网媒体 URL")
             video_url = file_ref
         else:
             try:
                 local_path = await self._resolve_media_local_path(media)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "video-reference-vision: failed to resolve local media path: %s",
+                    "video-reference-vision: 解析本地媒体路径失败：%s",
                     exc,
                 )
                 return None
@@ -1762,7 +1762,7 @@ class Main(Star):
                 strategy != "kimi" or not kimi_upload_supported
             ):
                 logger.warning(
-                    "video-reference-vision: skip oversized local media (%.2fMB > %dMB): %s",
+                    "video-reference-vision: 已跳过超大本地媒体（%.2fMB > %dMB）：%s",
                     size_bytes / 1024 / 1024,
                     max_size_mb,
                     local_path,
@@ -1779,13 +1779,13 @@ class Main(Star):
                 )
                 == "upload"
             ):
-                logger.info("video-reference-vision: using Kimi upload mode")
+                logger.info("video-reference-vision: 使用 Kimi 上传模式")
                 return await self._build_kimi_upload_video_part(
                     provider=provider,
                     local_path=local_path,
                 )
 
-            logger.info("video-reference-vision: using local media base64 payload")
+            logger.info("video-reference-vision: 使用本地媒体 base64 载荷")
             video_url = _file_to_data_url(local_path, mime_hint=mime_hint)
 
         part = {"type": "video_url", "video_url": {"url": video_url}}
@@ -1815,7 +1815,7 @@ class Main(Star):
                 api_base = configured_api_base or direct_api_base or "https://api.moonshot.cn/v1"
             api_key = str(getattr(provider, "get_current_key", lambda: "")() or "")
             if not api_key:
-                logger.warning("video-reference-vision: missing api key for Kimi upload")
+                logger.warning("video-reference-vision: Kimi 上传缺少 API Key")
                 return None
             default_headers = _kimi_compat_headers(provider)
             client = AsyncOpenAI(
@@ -1839,11 +1839,11 @@ class Main(Star):
             )
             file_id = str(getattr(file_obj, "id", "") or "")
             if not file_id:
-                logger.warning("video-reference-vision: Kimi upload returned empty file id")
+                logger.warning("video-reference-vision: Kimi 上传返回了空文件 ID")
                 return None
             return {"type": "video_url", "video_url": {"url": f"ms://{file_id}"}}
         except Exception as exc:  # noqa: BLE001
-            logger.warning("video-reference-vision: Kimi upload failed: %s", exc)
+            logger.warning("video-reference-vision: Kimi 上传失败：%s", exc)
             return None
 
     async def _rewrite_request_with_video_parts(
