@@ -460,6 +460,95 @@ def _extract_openai_completion_text(completion: Any) -> str:
     return "\n".join(parts).strip()
 
 
+def _read_usage_field(obj: Any, *names: str) -> Any:
+    if obj is None:
+        return None
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj.get(name)
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _coerce_usage_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _extract_token_usage_snapshot(response: Any) -> TokenUsageSnapshot | None:
+    usage = _read_usage_field(response, "usage", "token_usage", "usage_metadata")
+    if usage is None:
+        raw_completion = _read_usage_field(response, "raw_completion")
+        usage = _read_usage_field(raw_completion, "usage", "usage_metadata")
+    if usage is None:
+        usage = response
+
+    prompt_details = _read_usage_field(usage, "prompt_tokens_details")
+    cached_tokens = _coerce_usage_int(
+        _read_usage_field(
+            usage,
+            "input_cached",
+            "cached_tokens",
+            "cache_read_input_tokens",
+            "cached_content_token_count",
+        )
+    )
+    if cached_tokens is None:
+        cached_tokens = _coerce_usage_int(
+            _read_usage_field(prompt_details, "cached_tokens")
+        )
+
+    input_tokens = _coerce_usage_int(
+        _read_usage_field(
+            usage,
+            "input",
+            "input_tokens",
+            "prompt_tokens",
+            "prompt_token_count",
+        )
+    )
+    if input_tokens is None:
+        input_other = _coerce_usage_int(_read_usage_field(usage, "input_other"))
+        if input_other is not None:
+            input_tokens = input_other + (cached_tokens or 0)
+
+    output_tokens = _coerce_usage_int(
+        _read_usage_field(
+            usage,
+            "output",
+            "output_tokens",
+            "completion_tokens",
+            "candidates_token_count",
+        )
+    )
+    total_tokens = _coerce_usage_int(
+        _read_usage_field(usage, "total", "total_tokens", "total_token_count")
+    )
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+        and cached_tokens is None
+    ):
+        return None
+    return TokenUsageSnapshot(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
+    )
+
+
 def _is_direct_caption_provider(provider: Any) -> bool:
     return _provider_id(provider) == "__video_caption_direct__"
 
@@ -586,6 +675,14 @@ class CaptionAttemptResult:
 
 
 @dataclass
+class TokenUsageSnapshot:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_tokens: int | None = None
+
+
+@dataclass
 class MediaProbeInfo:
     duration_seconds: float | None = None
     width: int | None = None
@@ -668,7 +765,9 @@ class DirectCaptionProvider:
             stream=False,
         )
         return SimpleNamespace(
-            completion_text=_extract_openai_completion_text(completion)
+            completion_text=_extract_openai_completion_text(completion),
+            usage=_read_usage_field(completion, "usage"),
+            raw_completion=completion,
         )
 
 
@@ -1790,6 +1889,36 @@ class Main(Star):
             self._format_optional_int(plan.estimated_total_tokens),
         )
 
+    def _log_api_token_usage(
+        self,
+        label: str,
+        llm_resp: Any,
+        *,
+        frame_count: int | None = None,
+    ) -> None:
+        usage = _extract_token_usage_snapshot(llm_resp)
+        frame_text = (
+            f"，帧数={frame_count}"
+            if frame_count is not None
+            else ""
+        )
+        if usage is None:
+            logger.info(
+                "video-reference-vision: %s API 实际 token 用量%s：提供商未返回 usage",
+                label,
+                frame_text,
+            )
+            return
+        logger.info(
+            "video-reference-vision: %s API 实际 token 用量%s：输入=%s，输出=%s，总计=%s，缓存输入=%s",
+            label,
+            frame_text,
+            self._format_optional_int(usage.input_tokens),
+            self._format_optional_int(usage.output_tokens),
+            self._format_optional_int(usage.total_tokens),
+            self._format_optional_int(usage.cached_tokens),
+        )
+
     async def _extract_frame_data_urls(self, media: SupportedMedia) -> list[str]:
         refs: list[str] = []
         if isinstance(media, Video):
@@ -1936,6 +2065,7 @@ class Main(Star):
                         exc,
                     )
                 else:
+                    self._log_api_token_usage("视频转述", llm_resp)
                     summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
                     if summary:
                         result.summary_text = summary
@@ -1991,6 +2121,11 @@ class Main(Star):
                 return result
             break
 
+        self._log_api_token_usage(
+            "抽帧转述",
+            llm_resp,
+            frame_count=len(current_frame_blocks),
+        )
         summary = str(getattr(llm_resp, "completion_text", "") or "").strip()
         if not summary:
             logger.warning("video-reference-vision: 抽帧转述提供商返回了空文本")

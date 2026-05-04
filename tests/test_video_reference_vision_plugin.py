@@ -27,9 +27,11 @@ spec.loader.exec_module(plugin_module)
 VideoMessageCache = plugin_module.VideoMessageCache
 Main = plugin_module.Main
 MediaProbeInfo = plugin_module.MediaProbeInfo
+TokenUsageSnapshot = plugin_module.TokenUsageSnapshot
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
 detect_video_strategy = plugin_module._detect_video_strategy
 normalize_openai_base_url = plugin_module._normalize_openai_base_url
+extract_token_usage_snapshot = plugin_module._extract_token_usage_snapshot
 
 
 class DummyProvider:
@@ -39,11 +41,13 @@ class DummyProvider:
         model: str = "",
         *,
         completion_text: str = "",
+        usage=None,
     ) -> None:
         self.provider_config = provider_config
         self._model = model or str(provider_config.get("model", ""))
         self._key = str(provider_config.get("key", "") or "")
         self._completion_text = completion_text
+        self._usage = usage
         self.calls: list[dict] = []
 
     def get_model(self) -> str:
@@ -54,7 +58,7 @@ class DummyProvider:
 
     async def text_chat(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(completion_text=self._completion_text)
+        return SimpleNamespace(completion_text=self._completion_text, usage=self._usage)
 
 
 class DummyContext:
@@ -871,6 +875,39 @@ def test_normalize_openai_base_url_strips_chat_completions_suffix():
     )
 
 
+def test_extract_token_usage_snapshot_from_astrbot_usage():
+    usage = SimpleNamespace(input_other=120, input_cached=30, output=50)
+    snapshot = extract_token_usage_snapshot(
+        SimpleNamespace(completion_text="ok", usage=usage)
+    )
+
+    assert snapshot == TokenUsageSnapshot(
+        input_tokens=150,
+        output_tokens=50,
+        total_tokens=200,
+        cached_tokens=30,
+    )
+
+
+def test_extract_token_usage_snapshot_from_openai_usage():
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=200,
+        total_tokens=1200,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=64),
+    )
+    snapshot = extract_token_usage_snapshot(
+        SimpleNamespace(completion_text="ok", usage=usage)
+    )
+
+    assert snapshot == TokenUsageSnapshot(
+        input_tokens=1000,
+        output_tokens=200,
+        total_tokens=1200,
+        cached_tokens=64,
+    )
+
+
 def test_resolve_frame_extraction_params_count_mode():
     provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
     plugin = Main(
@@ -1066,6 +1103,7 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
     caption_provider = DummyProvider(
         {"id": "video_qwen", "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"},
         completion_text="视频里有人在演示插件配置页面。",
+        usage=SimpleNamespace(prompt_tokens=321, completion_tokens=45, total_tokens=366),
     )
     plugin = Main(
         DummyContext(chat_provider, {"video_qwen": caption_provider}),
@@ -1111,6 +1149,15 @@ async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path:
         "video-reference-vision: 视频转述结果：%s",
         "视频里有人在演示插件配置页面。",
     )
+    mock_logger_info.assert_any_call(
+        "video-reference-vision: %s API 实际 token 用量%s：输入=%s，输出=%s，总计=%s，缓存输入=%s",
+        "视频转述",
+        "",
+        "321",
+        "45",
+        "366",
+        "未知",
+    )
 
 
 @pytest.mark.asyncio
@@ -1128,7 +1175,10 @@ async def test_current_provider_falls_back_to_frame_caption_when_video_is_reject
         if any(part.get("type") == "video_url" for part in content):
             raise RuntimeError("No endpoints found that support input video")
         assert any(part.get("type") == "image_url" for part in content)
-        return SimpleNamespace(completion_text="frame based summary")
+        return SimpleNamespace(
+            completion_text="frame based summary",
+            usage=SimpleNamespace(input_other=500, input_cached=25, output=60),
+        )
 
     provider.text_chat = fake_text_chat
     plugin = Main(
@@ -1148,7 +1198,7 @@ async def test_current_provider_falls_back_to_frame_caption_when_video_is_reject
     )
     req = ProviderRequest(prompt="这个视频在讲什么？")
 
-    with patch.object(
+    with patch.object(plugin_module.logger, "info") as mock_logger_info, patch.object(
         plugin,
         "_extract_frame_data_urls",
         return_value=["data:image/jpeg;base64,AAAA"],
@@ -1165,6 +1215,15 @@ async def test_current_provider_falls_back_to_frame_caption_when_video_is_reject
         for part in rewritten
     )
     assert not any(part.get("type") == "video_url" for part in rewritten)
+    mock_logger_info.assert_any_call(
+        "video-reference-vision: %s API 实际 token 用量%s：输入=%s，输出=%s，总计=%s，缓存输入=%s",
+        "抽帧转述",
+        "，帧数=1",
+        "525",
+        "60",
+        "585",
+        "25",
+    )
 
 
 @pytest.mark.asyncio
