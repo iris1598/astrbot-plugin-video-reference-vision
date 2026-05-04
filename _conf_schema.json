@@ -181,6 +181,15 @@
     "hint": "插件直连独立视频转述模型时的请求超时，单位秒。",
     "default": 120
   },
+  "video_caption_direct_test_entry": {
+    "type": "text",
+    "description": "测试视频模型入口",
+    "hint": "AstrBot 当前版本的插件配置页还不支持这里直接渲染自定义动作按钮，所以测试入口改为显式显示命令。引用一条视频后执行该命令，可检查当前独立视频转述模型的连通性和转述结果。",
+    "default": "/video_ref_test\n别名：测试视频模型、测试视频转述模型",
+    "condition": {
+      "video_caption_direct_enabled": true
+    }
+  },
   "video_caption_provider_id": {
     "type": "string",
     "description": "视频转述模型",

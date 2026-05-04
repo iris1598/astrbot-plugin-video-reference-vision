@@ -186,6 +186,7 @@ README.md
 - `video_caption_direct_enabled`：启用插件内独立视频转述通道。
 - `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
 - `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。选择 `kimicode` 时，插件会按 Kimi Code 官方约定自动使用 `kimi-for-coding`，模型输入框可留空或忽略。
+- `video_caption_direct_test_entry`：设置页里显式显示测试命令入口。当前 AstrBot WebUI 还不支持插件在这里直接挂一个自定义动作按钮，所以这里会直接提示使用 `/video_ref_test`。
 - `video_caption_prompt`：发给视频转述模型的提示词。
 - `video_caption_use_current_question`：转述时是否带上用户当前问题。
 
