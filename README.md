@@ -1,4 +1,4 @@
-﻿# 引用视频理解
+﻿# 给清漪做的引用视频理解
 
 > 注意：目前本插件的视频转述模型里，只有 Moonshot 官方 API（`api.moonshot.ai` / `api.moonshot.cn`）支持优先尝试原生视频解析；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析；其他平台/代理网关（如 OpenAI-compatible 聚合网关）暂未适配视频输入。
 > 作者主页：https://github.com/Sisyphbaous-DT-Project
