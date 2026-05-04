@@ -191,7 +191,9 @@ README.md
 ### 抽帧兜底
 
 - `video_caption_frame_fallback`：视频原生输入失败时，是否用 `ffmpeg` 抽帧后改走图片输入。
+- `video_caption_frame_mode`：抽帧模式。`count` 表示按总帧数均匀抽帧，`fps` 表示按每秒抽帧数量抽帧。
 - `video_caption_frame_count`：最多发多少张关键帧。
+- `video_caption_frame_fps`：仅在 `fps` 模式下生效，表示每秒抽多少帧。
 - `ffmpeg_path`：可选，手动指定 `ffmpeg` 路径。
 - `ffprobe_path`：可选，手动指定 `ffprobe` 路径。
 

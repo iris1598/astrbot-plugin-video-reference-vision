@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import glob
+import math
 import mimetypes
 import os
 import platform
@@ -74,7 +75,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "video_caption_use_current_question": True,
     "video_caption_use_current_provider": True,
     "video_caption_frame_fallback": True,
+    "video_caption_frame_mode": "count",
     "video_caption_frame_count": 4,
+    "video_caption_frame_fps": 1.0,
     "native_video_injection_fallback": True,
     "video_caption_direct_enabled": False,
     "video_caption_direct_transport": VIDEO_TRANSPORT_AUTO,
@@ -1294,44 +1297,62 @@ class Main(Star):
         self,
         *,
         local_path: str,
-        frame_count: int,
     ) -> list[str]:
         ffmpeg_cmd = self._get_ffmpeg_command()
         if shutil.which(ffmpeg_cmd) is None and not os.path.exists(ffmpeg_cmd):
             raise FileNotFoundError(f"ffmpeg not found: {ffmpeg_cmd}")
 
         duration_seconds = self._probe_media_duration_seconds(local_path)
+        fps_expr, frame_limit = self._resolve_frame_extraction_params(
+            duration_seconds=duration_seconds
+        )
+
+        with tempfile.TemporaryDirectory(prefix="video_ref_frames_") as tmp_dir:
+            output_pattern = os.path.join(tmp_dir, "frame_%03d.jpg")
+            command = [
+                ffmpeg_cmd,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                local_path,
+                "-vf",
+                f"fps={fps_expr}",
+            ]
+            if frame_limit is not None:
+                command.extend(["-frames:v", str(frame_limit)])
+            command.append(output_pattern)
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            frame_files = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.jpg")))
+            return [_file_to_data_url(path, mime_hint="image/jpeg") for path in frame_files]
+
+    def _resolve_frame_extraction_params(
+        self,
+        *,
+        duration_seconds: float | None,
+    ) -> tuple[str, int | None]:
+        frame_mode = str(
+            self.config.get("video_caption_frame_mode", "count") or "count"
+        ).strip().lower()
+        if frame_mode == "fps":
+            frame_fps = max(
+                0.1,
+                float(self.config.get("video_caption_frame_fps", 1.0) or 1.0),
+            )
+            frame_limit: int | None = None
+            if duration_seconds and duration_seconds > 0:
+                frame_limit = max(1, math.ceil(duration_seconds * frame_fps))
+            return f"{frame_fps:.6f}", frame_limit
+
+        frame_count = max(1, int(self.config.get("video_caption_frame_count", 4)))
         fps_expr = "1"
         if duration_seconds and duration_seconds > 0:
             fps_value = max(frame_count / max(duration_seconds, 1.0), 0.1)
             fps_expr = f"{fps_value:.6f}"
-
-        with tempfile.TemporaryDirectory(prefix="video_ref_frames_") as tmp_dir:
-            output_pattern = os.path.join(tmp_dir, "frame_%03d.jpg")
-            subprocess.run(
-                [
-                    ffmpeg_cmd,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    local_path,
-                    "-vf",
-                    f"fps={fps_expr}",
-                    "-frames:v",
-                    str(frame_count),
-                    output_pattern,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            frame_files = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.jpg")))
-            return [_file_to_data_url(path, mime_hint="image/jpeg") for path in frame_files]
+        return fps_expr, frame_count
 
     async def _extract_frame_data_urls(self, media: SupportedMedia) -> list[str]:
-        frame_count = max(1, int(self.config.get("video_caption_frame_count", 4)))
         refs: list[str] = []
         if isinstance(media, Video):
             cover_ref = str(media.cover or "").strip()
@@ -1351,7 +1372,6 @@ class Main(Star):
             frame_refs = await asyncio.to_thread(
                 self._extract_frame_data_urls_sync,
                 local_path=local_path,
-                frame_count=frame_count,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

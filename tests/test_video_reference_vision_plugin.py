@@ -833,6 +833,57 @@ def test_normalize_openai_base_url_strips_chat_completions_suffix():
     )
 
 
+def test_resolve_frame_extraction_params_count_mode():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "video_caption_frame_mode": "count",
+            "video_caption_frame_count": 4,
+        },
+    )
+
+    fps_expr, frame_limit = plugin._resolve_frame_extraction_params(duration_seconds=10.0)
+
+    assert fps_expr == "0.400000"
+    assert frame_limit == 4
+
+
+def test_resolve_frame_extraction_params_fps_mode():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "video_caption_frame_mode": "fps",
+            "video_caption_frame_fps": 1.5,
+        },
+    )
+
+    fps_expr, frame_limit = plugin._resolve_frame_extraction_params(duration_seconds=10.0)
+
+    assert fps_expr == "1.500000"
+    assert frame_limit == 15
+
+
+def test_resolve_frame_extraction_params_fps_mode_without_duration():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "video_caption_frame_mode": "fps",
+            "video_caption_frame_fps": 2.0,
+        },
+    )
+
+    fps_expr, frame_limit = plugin._resolve_frame_extraction_params(duration_seconds=None)
+
+    assert fps_expr == "2.000000"
+    assert frame_limit is None
+
+
 @pytest.mark.asyncio
 async def test_video_caption_provider_rewrites_request_as_text_summary(tmp_path: Path):
     video_file = tmp_path / "caption.mp4"

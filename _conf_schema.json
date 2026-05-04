@@ -212,11 +212,27 @@
     "hint": "视频原生输入被网关拒绝时，尝试用 ffmpeg 抽取关键帧并按图片发送给转述模型。适合只支持图像、不支持视频的模型。",
     "default": true
   },
+  "video_caption_frame_mode": {
+    "type": "string",
+    "description": "抽帧模式",
+    "hint": "`count` 按总帧数均匀抽帧；`fps` 按每秒抽帧数量抽帧。",
+    "default": "count",
+    "options": [
+      "count",
+      "fps"
+    ]
+  },
   "video_caption_frame_count": {
     "type": "int",
     "description": "抽帧数量",
     "hint": "抽帧兜底时最多发送多少张关键帧。数量越多越完整，但请求也会更重。",
     "default": 4
+  },
+  "video_caption_frame_fps": {
+    "type": "float",
+    "description": "每秒抽帧数量",
+    "hint": "仅在 `video_caption_frame_mode=fps` 时生效，例如填 `1.0` 表示每秒抽 1 帧。",
+    "default": 1.0
   },
   "native_video_injection_fallback": {
     "type": "bool",
