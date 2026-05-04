@@ -72,6 +72,15 @@ class DummyContext:
         return self._extra_providers.get(provider_id)
 
 
+class SaveableConfig(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.save_calls = 0
+
+    def save_config(self):
+        self.save_calls += 1
+
+
 class DummyEvent:
     def __init__(
         self,
@@ -877,6 +886,19 @@ def test_resolve_frame_extraction_params_count_mode():
 
     assert fps_expr == "0.400000"
     assert frame_limit == 4
+
+
+def test_plugin_init_backfills_new_config_defaults_for_settings_page():
+    provider = DummyProvider({"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text"})
+    config = SaveableConfig({"enabled": True})
+
+    plugin = Main(DummyContext(provider), config=config)
+
+    assert config["video_caption_frame_mode"] == "auto"
+    assert config["video_caption_frame_auto_min_context_k"] == 150
+    assert config["video_caption_frame_auto_max_context_k"] == 200
+    assert plugin.config["video_caption_frame_mode"] == "auto"
+    assert config.save_calls == 1
 
 
 def test_resolve_frame_extraction_params_fps_mode():

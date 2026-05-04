@@ -741,12 +741,23 @@ class Main(Star):
         super().__init__(context, config)
         merged = dict(DEFAULT_CONFIG)
         if isinstance(config, dict):
+            self._ensure_config_defaults(config)
             merged.update(config)
         self.config = merged
         self.video_cache = VideoMessageCache(
             ttl_seconds=int(self.config.get("cache_ttl_seconds", 7200)),
             max_entries=int(self.config.get("cache_max_entries", 500)),
         )
+
+    def _ensure_config_defaults(self, config: dict) -> None:
+        updated = False
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in config or config[key] is None:
+                config[key] = value
+                updated = True
+        save_config = getattr(config, "save_config", None)
+        if updated and callable(save_config):
+            save_config()
 
     def _get_direct_caption_provider_config(self) -> dict[str, Any]:
         transport = _normalize_video_transport(
