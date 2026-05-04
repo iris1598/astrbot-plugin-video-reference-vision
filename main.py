@@ -52,11 +52,10 @@ KIMI_VIDEO_TRANSPORTS = {
 FRAME_MODE_AUTO = "auto"
 FRAME_MODE_COUNT = "count"
 FRAME_MODE_FPS = "fps"
-AUTO_FRAME_DEFAULT_TOKENS = 60000
-AUTO_FRAME_JPEG_BYTES_PER_PIXEL = 0.18
+AUTO_FRAME_DEFAULT_TOKENS = 1200
 AUTO_FRAME_BASE64_CHARS_PER_TOKEN = 2.0
 AUTO_FRAME_TEXT_TOKENS = 3000
-AUTO_FRAME_MIN_FRAME_TOKENS = 16000
+AUTO_FRAME_MIN_FRAME_TOKENS = 800
 AUTO_FRAME_MAX_FRAMES = 80
 
 
@@ -1820,18 +1819,11 @@ class Main(Star):
     def _estimate_frame_tokens(self, probe_info: MediaProbeInfo) -> int:
         if not probe_info.width or not probe_info.height:
             return AUTO_FRAME_DEFAULT_TOKENS
-        pixel_count = max(1, probe_info.width * probe_info.height)
-        estimated_jpeg_bytes = max(
-            4096,
-            int(pixel_count * AUTO_FRAME_JPEG_BYTES_PER_PIXEL),
-        )
-        base64_chars = math.ceil(estimated_jpeg_bytes * 4 / 3)
-        request_tokens = math.ceil(base64_chars / AUTO_FRAME_BASE64_CHARS_PER_TOKEN)
         vision_tiles = math.ceil(probe_info.width / 512) * math.ceil(
             probe_info.height / 512
         )
         vision_tokens = 85 + (170 * max(1, vision_tiles))
-        return max(request_tokens, vision_tokens)
+        return max(AUTO_FRAME_DEFAULT_TOKENS, vision_tokens)
 
     @staticmethod
     def _estimate_data_url_tokens(data_urls: list[str]) -> int:

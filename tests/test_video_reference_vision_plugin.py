@@ -996,10 +996,10 @@ def test_resolve_frame_extraction_params_auto_mode_uses_context_budget():
     )
 
     assert plan.mode == "auto"
-    assert plan.frame_limit == 12
-    assert plan.fps_expr == "1.200000"
-    assert plan.output_width == 486
-    assert plan.output_height == 272
+    assert plan.frame_limit == 20
+    assert plan.fps_expr == "2.000000"
+    assert plan.output_width is None
+    assert plan.output_height is None
     assert plan.target_min_tokens == 150000
     assert plan.target_max_tokens == 200000
     assert plan.estimated_total_tokens <= 200000
@@ -1029,11 +1029,11 @@ def test_resolve_frame_extraction_params_auto_mode_caps_high_resolution_frames()
     )
 
     assert plan.mode == "auto"
-    assert plan.frame_limit == 12
-    assert plan.output_width == 486
-    assert plan.output_height == 272
+    assert plan.frame_limit == 20
+    assert plan.output_width is None
+    assert plan.output_height is None
     assert plan.estimated_total_tokens <= 200000
-    assert plugin._build_ffmpeg_frame_filter(plan) == "fps=1.200000,scale=486:272:flags=lanczos"
+    assert plugin._build_ffmpeg_frame_filter(plan) == "fps=2.000000"
 
 
 @pytest.mark.asyncio
