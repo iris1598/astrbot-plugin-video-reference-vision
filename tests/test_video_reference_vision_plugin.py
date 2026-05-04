@@ -626,7 +626,9 @@ async def test_opencode_kimi_remote_video_uses_base64_not_public_url(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
+async def test_kimicode_base_url_skips_native_video_injection_when_frame_caption_unavailable(
+    tmp_path: Path,
+):
     video_file = tmp_path / "kimi_code_big.mp4"
     video_file.write_bytes(b"\x00" * (2 * 1024 * 1024))
 
@@ -657,33 +659,11 @@ async def test_kimicode_base_url_uploads_oversized_local_video(tmp_path: Path):
     )
     req = ProviderRequest(prompt="read this video")
 
-    class FakeAsyncOpenAI:
-        def __init__(self, api_key, base_url, default_headers=None):
-            assert api_key == "kc_test_key"
-            assert base_url == "https://api.kimi.com/coding/v1"
-            assert default_headers is not None
-            assert default_headers["X-Msh-Platform"] == "kimi_cli"
-
-        async def post(self, path, cast_to, body, files, options):
-            assert path == "/files"
-            assert cast_to is plugin_module.KimiFileObject
-            assert body == {"purpose": "video"}
-            assert options == {"headers": {"Content-Type": "multipart/form-data"}}
-            filename, data, mime_type = files["file"]
-            assert filename == "upload.mp4"
-            assert data == video_file.read_bytes()
-            assert mime_type == "video/mp4"
-            return SimpleNamespace(id="file_test_kimicode")
-
-    with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
-        await plugin.inject_quoted_video(event, req)
+    await plugin.inject_quoted_video(event, req)
 
     content = await _assembled_content(req)
-    assert any(
-        part.get("type") == "video_url"
-        and str(part.get("video_url", {}).get("url", "")).startswith("ms://")
-        for part in content
-    )
+    assert isinstance(content, str)
+    assert "read this video" in content
 
 
 @pytest.mark.asyncio
@@ -1039,6 +1019,61 @@ async def test_current_provider_falls_back_to_frame_caption_when_video_is_reject
     assert any(
         part.get("type") == "text"
         and "frame based summary" in part.get("text", "")
+        for part in rewritten
+    )
+    assert not any(part.get("type") == "video_url" for part in rewritten)
+
+
+@pytest.mark.asyncio
+async def test_kimicode_current_provider_uses_frame_caption_first(tmp_path: Path):
+    video_file = tmp_path / "kimicode_frames.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    provider = DummyProvider(
+        {
+            "id": "chat_kimi_code",
+            "api_base": "https://api.kimi.com/coding/v1",
+            "model": "kimi-k2.6",
+        }
+    )
+
+    async def fake_text_chat(**kwargs):
+        provider.calls.append(kwargs)
+        content = kwargs["contexts"][0]["content"]
+        assert not any(part.get("type") == "video_url" for part in content)
+        assert any(part.get("type") == "image_url" for part in content)
+        return SimpleNamespace(completion_text="kimicode frame summary")
+
+    provider.text_chat = fake_text_chat
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mode": "auto",
+            "video_caption_frame_fallback": False,
+        },
+    )
+
+    event = make_event(
+        session_id="platform:group:111_kimicode",
+        message_id="query_frame_kimicode",
+        message_chain=[Reply(id="r_frame_kimicode", chain=[Video.fromFileSystem(str(video_file))])],
+        message_str="这个视频在讲什么？",
+    )
+    req = ProviderRequest(prompt="这个视频在讲什么？")
+
+    with patch.object(
+        plugin,
+        "_extract_frame_data_urls",
+        return_value=["data:image/jpeg;base64,AAAA"],
+    ):
+        await plugin.inject_quoted_video(event, req)
+
+    assert len(provider.calls) == 1
+    rewritten = await _assembled_content(req)
+    assert any(
+        part.get("type") == "text"
+        and "kimicode frame summary" in part.get("text", "")
         for part in rewritten
     )
     assert not any(part.get("type") == "video_url" for part in rewritten)

@@ -148,7 +148,7 @@
   "video_caption_direct_transport": {
     "type": "string",
     "description": "独立转述视频传输方式",
-    "hint": "`auto` 自动判断；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 按 Kimi Code 方式处理视频；`generic` 则按通用 OpenAI-compatible 方式处理。",
+    "hint": "`auto` 自动判断；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 当前不会再尝试原生 `video_url`，而是直接走抽帧转述；`generic` 则按通用 OpenAI-compatible 方式处理。",
     "default": "auto",
     "options": [
       "auto",
@@ -209,7 +209,7 @@
   "video_caption_frame_fallback": {
     "type": "bool",
     "description": "转述失败时抽帧兜底",
-    "hint": "视频原生输入被网关拒绝时，尝试用 ffmpeg 抽取关键帧并按图片发送给转述模型。适合只支持图像、不支持视频的模型。",
+    "hint": "视频原生输入被网关拒绝时，尝试用 ffmpeg 抽取关键帧并按图片发送给转述模型。适合只支持图像、不支持视频的模型。选择 `kimicode` 时，这条链路会被提升为第一优先级。",
     "default": true
   },
   "video_caption_frame_mode": {

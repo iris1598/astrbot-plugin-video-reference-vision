@@ -208,6 +208,15 @@ def _provider_video_transport(provider: Any) -> str:
     return _normalize_video_transport(provider_config.get("video_transport"))
 
 
+def _is_kimicode_provider(provider: Any, *, strategy: str | None = None) -> bool:
+    if strategy != "kimi":
+        return False
+    return _uses_kimicode_transport(
+        transport=_provider_video_transport(provider),
+        api_base=_provider_api_base(provider),
+    )
+
+
 def _supports_kimi_file_upload(provider: Any) -> bool:
     transport = _provider_video_transport(provider)
     if transport in KIMI_VIDEO_TRANSPORTS:
@@ -998,6 +1007,16 @@ class Main(Star):
             logger.debug("video-reference-vision: skip, provider strategy not matched")
             return
 
+        if _is_kimicode_provider(current_provider, strategy=current_strategy):
+            if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
+                req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
+                    list(req.extra_user_content_parts or [])
+                )
+            logger.info(
+                "video-reference-vision: skip native video injection for Kimi Code transport"
+            )
+            return
+
         if not bool(self.config.get("native_video_injection_fallback", True)):
             if str(self.config.get("fallback_behavior", "keep_text")) == "silent":
                 req.extra_user_content_parts = _remove_video_attachment_text_from_extra_parts(
@@ -1461,8 +1480,13 @@ class Main(Star):
         user_question: str,
     ) -> CaptionAttemptResult:
         result = CaptionAttemptResult()
+        prefer_frame_caption = _is_kimicode_provider(provider, strategy=strategy)
 
-        if strategy:
+        if prefer_frame_caption:
+            logger.info(
+                "video-reference-vision: Kimi Code transport does not support native video parsing here, use frame caption first"
+            )
+        elif strategy:
             video_parts: list[dict] = []
             for item in media:
                 part = await self._build_video_part(
@@ -1500,7 +1524,9 @@ class Main(Star):
                         "video-reference-vision: video caption provider returned empty text"
                     )
 
-        if not bool(self.config.get("video_caption_frame_fallback", True)):
+        if not prefer_frame_caption and not bool(
+            self.config.get("video_caption_frame_fallback", True)
+        ):
             return result
 
         frame_blocks = await self._build_frame_caption_blocks(media=media)

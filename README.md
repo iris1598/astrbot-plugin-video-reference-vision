@@ -1,6 +1,6 @@
 ﻿# 引用视频理解
 
-> 注意：目前本插件的视频转述模型仅保证兼容 Moonshot 官方 API（`api.moonshot.ai` / `api.moonshot.cn`）和 Kimi Code（`api.kimi.com/coding/v1`）；其他平台/代理网关（如 OpenAI-compatible 聚合网关）暂未适配视频输入。
+> 注意：目前本插件的视频转述模型里，只有 Moonshot 官方 API（`api.moonshot.ai` / `api.moonshot.cn`）支持优先尝试原生视频解析；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析；其他平台/代理网关（如 OpenAI-compatible 聚合网关）暂未适配视频输入。
 > 作者主页：https://github.com/Sisyphbaous-DT-Project
 
 给 AstrBot 用的一个小插件：用户引用一条视频消息提问时，插件会尽量把“被引用的视频内容”变成模型真正能理解的输入，而不是只把 AstrBot 默认的附件提示文本发过去。
@@ -54,9 +54,10 @@ AstrBot 能识别视频消息，也会生成类似下面这样的附件提示：
 
 1. 如果配置了 `video_caption_provider_id`，优先用这个模型做视频转述。
 2. 如果没配置，并且 `video_caption_use_current_provider=true`，就先用当前聊天模型做转述。
-3. 如果模型支持原生视频输入，就先尝试直接发 `video_url`。
-4. 如果视频输入被网关拒绝，并且 `video_caption_frame_fallback=true`，就尝试用 `ffmpeg` 抽关键帧，再按 `image_url` 发给转述模型。
-5. 转述成功后，把结果写成一段文本，例如：
+3. 如果配置的是 `kimicode`，会直接跳过原生 `video_url`，优先用 `ffmpeg` 抽关键帧，再按 `image_url` 发给转述模型。
+4. 其他支持原生视频输入的链路，才会先尝试直接发 `video_url`。
+5. 如果视频输入被网关拒绝，并且 `video_caption_frame_fallback=true`，就继续改走抽帧图片输入。
+6. 转述成功后，把结果写成一段文本，例如：
 
 ```text
 [引用视频内容转述]
@@ -183,14 +184,14 @@ README.md
 - `video_caption_provider_id`：单独指定视频转述模型。留空时会优先用当前聊天模型做转述。
 - `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
 - `video_caption_direct_enabled`：启用插件内独立视频转述通道。
-- `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` / `kimicode` 会强制按 Kimi 视频输入链路处理，`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
+- `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
 - `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。选择 `kimicode` 时，插件会按 Kimi Code 官方约定自动使用 `kimi-for-coding`，模型输入框可留空或忽略。
 - `video_caption_prompt`：发给视频转述模型的提示词。
 - `video_caption_use_current_question`：转述时是否带上用户当前问题。
 
 ### 抽帧兜底
 
-- `video_caption_frame_fallback`：视频原生输入失败时，是否用 `ffmpeg` 抽帧后改走图片输入。
+- `video_caption_frame_fallback`：视频原生输入失败时，是否用 `ffmpeg` 抽帧后改走图片输入。选择 `kimicode` 时，抽帧会被提升到第一优先级。
 - `video_caption_frame_mode`：抽帧模式。`count` 表示按总帧数均匀抽帧，`fps` 表示按每秒抽帧数量抽帧。
 - `video_caption_frame_count`：最多发多少张关键帧。
 - `video_caption_frame_fps`：仅在 `fps` 模式下生效，表示每秒抽多少帧。
@@ -211,7 +212,7 @@ README.md
 - `kimi_strategy=base64`：强制本地转 base64。
 - `kimi_upload_on_oversize=true`：视频超过 base64 限制时，自动改走上传模式。
 - `kimi_api_base`：可选覆盖 Kimi 接口地址。
-- `kimicode` 传输方式会复用 Kimi CLI 的轻量上传逻辑：先把本地视频以 `purpose=video` 上传到 `/files`，再用返回的 `ms://file_id` 发给聊天接口。
+- `kimicode` 当前不再尝试插件内原生视频解析，而是直接复用抽帧转述链路。
 
 ### GIF
 
