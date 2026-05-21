@@ -829,6 +829,19 @@ def test_direct_transport_generic_disables_kimi_transport_override():
     assert detect_video_strategy(provider, mode="force") == "generic"
 
 
+def test_direct_transport_qwen_forces_qwen_strategy_on_custom_base():
+    provider = plugin_module.DirectCaptionProvider(
+        provider_id="__video_caption_direct__",
+        transport="qwen",
+        api_base="https://proxy.example.com/v1",
+        api_key="direct_test_key",
+        model="custom-video-model",
+        timeout_seconds=30,
+    )
+
+    assert detect_video_strategy(provider, mode="force") == "qwen"
+
+
 def test_direct_kimicode_model_is_optional_and_normalized():
     provider = DummyProvider(
         {"id": "chat_text", "api_base": "https://api.example.com/v1", "model": "text-only-model"}
@@ -896,6 +909,103 @@ def test_normalize_openai_base_url_strips_chat_completions_suffix():
         normalize_openai_base_url("https://api.example.com/v1/responses")
         == "https://api.example.com/v1"
     )
+
+
+def test_qwen_strategy_detection_uses_dashscope_base_and_transport():
+    official_provider = DummyProvider(
+        {
+            "id": "video_qwen",
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.6-plus",
+        }
+    )
+    transport_provider = DummyProvider(
+        {
+            "id": "video_qwen_custom",
+            "api_base": "https://api.example.com/v1",
+            "model": "custom-video-model",
+            "video_transport": "qwen",
+        }
+    )
+
+    assert detect_video_strategy(official_provider, mode="auto") == "qwen"
+    assert detect_video_strategy(transport_provider, mode="auto") == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_qwen_remote_video_part_adds_fps():
+    provider = DummyProvider(
+        {
+            "id": "video_qwen",
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.6-plus",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={"enabled": True, "qwen_fps": 1.5},
+    )
+
+    part = await plugin._build_video_part(
+        Video(file="https://example.com/demo.mp4"),
+        strategy="qwen",
+        provider=provider,
+    )
+
+    assert part == {
+        "type": "video_url",
+        "video_url": {"url": "https://example.com/demo.mp4"},
+        "fps": 1.5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_qwen_local_video_part_obeys_qwen_base64_limit(tmp_path: Path):
+    video_file = tmp_path / "qwen_local.mp4"
+    video_file.write_bytes(b"\x00" * (8 * 1024 * 1024))
+    provider = DummyProvider(
+        {
+            "id": "video_qwen",
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.6-plus",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={"enabled": True, "max_base64_mb": 20},
+    )
+
+    part = await plugin._build_video_part(
+        Video.fromFileSystem(str(video_file)),
+        strategy="qwen",
+        provider=provider,
+    )
+
+    assert part is None
+
+
+@pytest.mark.asyncio
+async def test_qwen_local_video_part_uses_data_url_under_qwen_limit(tmp_path: Path):
+    video_file = tmp_path / "qwen_small.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    provider = DummyProvider(
+        {
+            "id": "video_qwen",
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.6-plus",
+        }
+    )
+    plugin = Main(DummyContext(provider), config={"enabled": True})
+
+    part = await plugin._build_video_part(
+        Video.fromFileSystem(str(video_file)),
+        strategy="qwen",
+        provider=provider,
+    )
+
+    assert part["type"] == "video_url"
+    assert part["video_url"]["url"].startswith("data:video/mp4;base64,")
+    assert part["fps"] == 2.0
 
 
 def test_mimo_strategy_detection_uses_official_base_and_transport():
@@ -1042,6 +1152,7 @@ def test_plugin_init_backfills_new_config_defaults_for_settings_page():
     assert config["video_caption_frame_auto_min_context_k"] == 150
     assert config["video_caption_frame_auto_max_context_k"] == 200
     assert config["video_caption_context_cache_rounds"] == 0
+    assert config["qwen_max_base64_mb"] == 7
     assert config["mimo_fps"] == 2.0
     assert config["mimo_media_resolution"] == "default"
     assert plugin.config["video_caption_frame_mode"] == "auto"

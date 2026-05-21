@@ -42,6 +42,7 @@ DEFAULT_VIDEO_CAPTION_PROMPT = (
 
 VIDEO_TRANSPORT_AUTO = "auto"
 VIDEO_TRANSPORT_GENERIC = "generic"
+VIDEO_TRANSPORT_QWEN = "qwen"
 VIDEO_TRANSPORT_MIMO = "mimo"
 VIDEO_TRANSPORT_KIMI_MOONSHOT = "moonshot"
 VIDEO_TRANSPORT_KIMI_KIMICODE = "kimicode"
@@ -68,6 +69,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "fallback_behavior": "keep_text",  # keep_text | silent
     "prefer_model_metadata_video": True,
     "qwen_fps": 2.0,
+    "qwen_max_base64_mb": 7,
     "generic_fps": 2.0,
     "mimo_fps": 2.0,
     "mimo_media_resolution": "default",
@@ -158,6 +160,7 @@ def _normalize_video_transport(value: Any) -> str:
     if transport in {
         VIDEO_TRANSPORT_AUTO,
         VIDEO_TRANSPORT_GENERIC,
+        VIDEO_TRANSPORT_QWEN,
         VIDEO_TRANSPORT_MIMO,
         VIDEO_TRANSPORT_KIMI_MOONSHOT,
         VIDEO_TRANSPORT_KIMI_KIMICODE,
@@ -345,6 +348,8 @@ def _detect_video_strategy(
 
     if transport in KIMI_VIDEO_TRANSPORTS:
         return "kimi"
+    if transport == VIDEO_TRANSPORT_QWEN:
+        return "qwen"
     if transport == VIDEO_TRANSPORT_MIMO:
         return "mimo"
     if transport == VIDEO_TRANSPORT_GENERIC:
@@ -2390,6 +2395,13 @@ class Main(Star):
             return "upload"
         return "base64"
 
+    def _max_base64_mb_for_strategy(self, strategy: str) -> int:
+        max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
+        if strategy == "qwen":
+            qwen_max_size_mb = max(1, int(self.config.get("qwen_max_base64_mb", 7)))
+            return min(max_size_mb, qwen_max_size_mb)
+        return max_size_mb
+
     async def _build_video_part(
         self,
         media: SupportedMedia,
@@ -2451,7 +2463,7 @@ class Main(Star):
                 return None
 
             size_bytes = os.path.getsize(local_path)
-            max_size_mb = max(1, int(self.config.get("max_base64_mb", 20)))
+            max_size_mb = self._max_base64_mb_for_strategy(strategy)
             if size_bytes > max_size_mb * 1024 * 1024 and (
                 strategy != "kimi" or not kimi_upload_supported
             ):

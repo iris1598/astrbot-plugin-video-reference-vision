@@ -56,6 +56,12 @@
     "hint": "传给 Qwen / DashScope 的视频抽帧频率，数值越高读取越细，但请求也会更重。",
     "default": 2.0
   },
+  "qwen_max_base64_mb": {
+    "type": "int",
+    "description": "Qwen 本地 base64 上限（MB）",
+    "hint": "DashScope OpenAI-compatible 通道官方建议视频超过 7MB 时使用公网 URL。Qwen 策略下本地视频会同时受此项和 `max_base64_mb` 约束。",
+    "default": 7
+  },
   "generic_fps": {
     "type": "float",
     "description": "通用抽帧频率",
@@ -164,10 +170,11 @@
   "video_caption_direct_transport": {
     "type": "string",
     "description": "独立转述视频传输方式",
-    "hint": "`auto` 自动判断；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 当前不会再尝试原生 `video_url`，而是直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 则按通用 OpenAI-compatible 方式处理。",
+    "hint": "`auto` 自动判断；`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 当前不会再尝试原生 `video_url`，而是直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 则按通用 OpenAI-compatible 方式处理。",
     "default": "auto",
     "options": [
       "auto",
+      "qwen",
       "moonshot",
       "kimicode",
       "mimo",

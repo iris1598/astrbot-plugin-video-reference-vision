@@ -1,6 +1,6 @@
 ﻿# 引用视频理解
 
-> 注意：目前本插件的视频转述模型里，已适配 Qwen/DashScope、Moonshot/Kimi 官方 API、小米 MiMo 官方 API，以及通用 OpenAI-compatible `video_url` 链路；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析。
+> 注意：目前本插件的视频转述模型里，已适配 Qwen/DashScope 官方 `video_url + fps`、Moonshot/Kimi 官方 API、小米 MiMo 官方 API，以及通用 OpenAI-compatible `video_url` 链路；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析。
 > 作者主页：https://github.com/Sisyphbaous-DT-Project
 
 他第一次给我看那些代码时，窗外的梧桐正往下掉叶子，十月末的风从纱窗缝里钻进来，在桌面上摊开的笔记本纸页间游走。他坐在宿舍那张吱嘎作响的椅子上，背微微弓着，手指在键盘上敲几下，又停下来，像是在斟酌什么。
@@ -294,7 +294,7 @@ README.md
 - `video_caption_provider_id`：单独指定视频转述模型。留空时会优先用当前聊天模型做转述。
 - `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
 - `video_caption_direct_enabled`：启用插件内独立视频转述通道。
-- `video_caption_direct_transport`：独立转述通道的视频传输方式。`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
+- `video_caption_direct_transport`：独立转述通道的视频传输方式。`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
 - `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。选择 `kimicode` 时，插件会按 Kimi Code 官方约定自动使用 `kimi-for-coding`，模型输入框可留空或忽略。
 - `video_caption_direct_test_entry`：设置页里显式显示测试命令入口。当前 AstrBot WebUI 还不支持插件在这里直接挂一个自定义动作按钮，所以这里会直接提示使用 `/video_ref_test`。
 - `video_caption_prompt`：发给视频转述模型的提示词。
@@ -330,6 +330,14 @@ README.md
 - `kimi_api_base`：可选覆盖 Kimi 接口地址。
 - `kimicode` 当前不再尝试插件内原生视频解析，而是直接复用抽帧转述链路。
 
+### Qwen / DashScope 相关
+
+- 官方 Base URL 通常是 `https://dashscope.aliyuncs.com/compatible-mode/v1`，可使用支持视频输入的 Qwen 视觉模型。
+- `video_caption_direct_transport=qwen`：强制按 Qwen/DashScope 官方 `video_url + fps` 请求格式处理，不依赖 `auto` 根据模型名或 Base URL 猜测。
+- `qwen_fps`：传给 Qwen 的 `fps`，默认 `2.0`。
+- `qwen_max_base64_mb`：Qwen 策略下本地视频转 base64 的专用上限，默认 `7`。DashScope 官方建议 OpenAI-compatible / HTTP 通道里超过 7MB 的视频使用公网 URL。
+- Qwen 官方 OpenAI-compatible 接口支持公网视频 URL 和小体积 base64 data URL；插件会优先使用公网 URL，本地视频超过上限时会跳过原生视频输入并转入抽帧兜底。
+
 ### MiMo 相关
 
 - 官方 Base URL 通常是 `https://api.xiaomimimo.com/v1`，模型可用 `mimo-v2.5` 或 `mimo-v2-omni`。
@@ -353,7 +361,7 @@ README.md
 - 视频原生输入失败时，自动抽帧并改走图片输入。
 - 转述成功后，把结果回写成文本，不再继续把 `video_url` 传给主对话。
 - 必要时再回退到原生 `video_url` 注入。
-- Qwen / DashScope 的 `video_url` 注入。
+- Qwen / DashScope 的 `video_url + fps` 注入和显式独立转述 transport。
 - 小米 MiMo 官方 `video_url + fps + media_resolution` 注入。
 - OpenRouter / 通用 OpenAI-compatible 的 `video_url` 注入。
 - Kimi 上传模式入口。
