@@ -32,6 +32,7 @@ TokenUsageSnapshot = plugin_module.TokenUsageSnapshot
 extract_video_path = plugin_module._extract_path_from_video_attachment_text
 detect_video_strategy = plugin_module._detect_video_strategy
 normalize_openai_base_url = plugin_module._normalize_openai_base_url
+normalize_mimo_media_resolution = plugin_module._normalize_mimo_media_resolution
 extract_token_usage_snapshot = plugin_module._extract_token_usage_snapshot
 
 
@@ -897,6 +898,90 @@ def test_normalize_openai_base_url_strips_chat_completions_suffix():
     )
 
 
+def test_mimo_strategy_detection_uses_official_base_and_transport():
+    official_provider = DummyProvider(
+        {
+            "id": "video_mimo",
+            "api_base": "https://api.xiaomimimo.com/v1",
+            "model": "mimo-v2.5",
+        }
+    )
+    transport_provider = DummyProvider(
+        {
+            "id": "video_mimo_custom",
+            "api_base": "https://api.example.com/v1",
+            "model": "custom-video-model",
+            "video_transport": "mimo",
+        }
+    )
+
+    assert detect_video_strategy(official_provider, mode="auto") == "mimo"
+    assert detect_video_strategy(transport_provider, mode="auto") == "mimo"
+
+
+def test_mimo_media_resolution_normalization():
+    assert normalize_mimo_media_resolution("max") == "max"
+    assert normalize_mimo_media_resolution("DEFAULT") == "default"
+    assert normalize_mimo_media_resolution("bad-value") == "default"
+
+
+@pytest.mark.asyncio
+async def test_mimo_remote_video_part_adds_fps_and_media_resolution():
+    provider = DummyProvider(
+        {
+            "id": "video_mimo",
+            "api_base": "https://api.xiaomimimo.com/v1",
+            "model": "mimo-v2.5",
+        }
+    )
+    plugin = Main(
+        DummyContext(provider),
+        config={
+            "enabled": True,
+            "mimo_fps": 3.5,
+            "mimo_media_resolution": "max",
+        },
+    )
+
+    part = await plugin._build_video_part(
+        Video(file="https://example.com/demo.mp4"),
+        strategy="mimo",
+        provider=provider,
+    )
+
+    assert part == {
+        "type": "video_url",
+        "video_url": {"url": "https://example.com/demo.mp4"},
+        "fps": 3.5,
+        "media_resolution": "max",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mimo_local_video_part_uses_data_url(tmp_path: Path):
+    video_file = tmp_path / "mimo_local.mp4"
+    video_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    provider = DummyProvider(
+        {
+            "id": "video_mimo",
+            "api_base": "https://api.xiaomimimo.com/v1",
+            "model": "mimo-v2.5",
+        }
+    )
+    plugin = Main(DummyContext(provider), config={"enabled": True})
+
+    part = await plugin._build_video_part(
+        Video.fromFileSystem(str(video_file)),
+        strategy="mimo",
+        provider=provider,
+    )
+
+    assert part["type"] == "video_url"
+    assert part["video_url"]["url"].startswith("data:video/mp4;base64,")
+    assert part["fps"] == 2.0
+    assert part["media_resolution"] == "default"
+
+
 def test_extract_token_usage_snapshot_from_astrbot_usage():
     usage = SimpleNamespace(input_other=120, input_cached=30, output=50)
     snapshot = extract_token_usage_snapshot(
@@ -957,6 +1042,8 @@ def test_plugin_init_backfills_new_config_defaults_for_settings_page():
     assert config["video_caption_frame_auto_min_context_k"] == 150
     assert config["video_caption_frame_auto_max_context_k"] == 200
     assert config["video_caption_context_cache_rounds"] == 0
+    assert config["mimo_fps"] == 2.0
+    assert config["mimo_media_resolution"] == "default"
     assert plugin.config["video_caption_frame_mode"] == "auto"
     assert config.save_calls == 1
 

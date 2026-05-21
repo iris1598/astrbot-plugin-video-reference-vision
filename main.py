@@ -42,6 +42,7 @@ DEFAULT_VIDEO_CAPTION_PROMPT = (
 
 VIDEO_TRANSPORT_AUTO = "auto"
 VIDEO_TRANSPORT_GENERIC = "generic"
+VIDEO_TRANSPORT_MIMO = "mimo"
 VIDEO_TRANSPORT_KIMI_MOONSHOT = "moonshot"
 VIDEO_TRANSPORT_KIMI_KIMICODE = "kimicode"
 KIMI_CODE_MODEL_ID = "kimi-for-coding"
@@ -68,6 +69,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "prefer_model_metadata_video": True,
     "qwen_fps": 2.0,
     "generic_fps": 2.0,
+    "mimo_fps": 2.0,
+    "mimo_media_resolution": "default",
     "kimi_strategy": "auto",  # auto | upload | base64
     "kimi_upload_on_oversize": True,
     "kimi_api_base": "",
@@ -115,6 +118,7 @@ class VideoURLPart(ContentPart):
     type: str = "video_url"
     video_url: VideoURL
     fps: float | None = None
+    media_resolution: str | None = None
 
 
 class KimiFileObject(OpenAIBaseModel):
@@ -154,11 +158,19 @@ def _normalize_video_transport(value: Any) -> str:
     if transport in {
         VIDEO_TRANSPORT_AUTO,
         VIDEO_TRANSPORT_GENERIC,
+        VIDEO_TRANSPORT_MIMO,
         VIDEO_TRANSPORT_KIMI_MOONSHOT,
         VIDEO_TRANSPORT_KIMI_KIMICODE,
     }:
         return transport
     return VIDEO_TRANSPORT_AUTO
+
+
+def _normalize_mimo_media_resolution(value: Any) -> str:
+    media_resolution = str(value or "").strip().lower()
+    if media_resolution in {"default", "max"}:
+        return media_resolution
+    return "default"
 
 
 def _is_kimicode_api_base(value: Any) -> bool:
@@ -333,6 +345,8 @@ def _detect_video_strategy(
 
     if transport in KIMI_VIDEO_TRANSPORTS:
         return "kimi"
+    if transport == VIDEO_TRANSPORT_MIMO:
+        return "mimo"
     if transport == VIDEO_TRANSPORT_GENERIC:
         return "generic"
 
@@ -340,10 +354,12 @@ def _detect_video_strategy(
         return "kimi"
     if "dashscope" in api_base or "qwen" in model or "qvq" in model:
         return "qwen"
+    if "xiaomimimo" in api_base or "api.mimo" in api_base:
+        return "mimo"
     if "openrouter.ai" in api_base:
         return "openrouter"
     if "mimo" in model or "xiaomi" in model:
-        return "openrouter"
+        return "mimo"
 
     modalities = _get_provider_modalities(provider) if prefer_model_metadata_video else []
     if "video" in modalities:
@@ -2469,6 +2485,11 @@ class Main(Star):
         part = {"type": "video_url", "video_url": {"url": video_url}}
         if strategy == "qwen":
             part["fps"] = float(self.config.get("qwen_fps", 2.0))
+        elif strategy == "mimo":
+            part["fps"] = float(self.config.get("mimo_fps", 2.0))
+            part["media_resolution"] = _normalize_mimo_media_resolution(
+                self.config.get("mimo_media_resolution", "default")
+            )
         elif strategy in {"openrouter", "generic"}:
             part["fps"] = float(self.config.get("generic_fps", 2.0))
         return part
