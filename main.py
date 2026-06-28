@@ -46,6 +46,7 @@ VIDEO_TRANSPORT_QWEN = "qwen"
 VIDEO_TRANSPORT_MIMO = "mimo"
 VIDEO_TRANSPORT_KIMI_MOONSHOT = "moonshot"
 VIDEO_TRANSPORT_KIMI_KIMICODE = "kimicode"
+VIDEO_TRANSPORT_DOUBAO = "doubao"
 KIMI_CODE_MODEL_ID = "kimi-for-coding"
 KIMI_VIDEO_TRANSPORTS = {
     VIDEO_TRANSPORT_KIMI_MOONSHOT,
@@ -73,6 +74,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "generic_fps": 2.0,
     "mimo_fps": 2.0,
     "mimo_media_resolution": "default",
+    "doubao_fps": 2.0,
     "kimi_strategy": "auto",  # auto | upload | base64
     "kimi_upload_on_oversize": True,
     "kimi_api_base": "",
@@ -164,6 +166,7 @@ def _normalize_video_transport(value: Any) -> str:
         VIDEO_TRANSPORT_MIMO,
         VIDEO_TRANSPORT_KIMI_MOONSHOT,
         VIDEO_TRANSPORT_KIMI_KIMICODE,
+        VIDEO_TRANSPORT_DOUBAO,
     }:
         return transport
     return VIDEO_TRANSPORT_AUTO
@@ -346,6 +349,8 @@ def _detect_video_strategy(
     provider_name = str(provider_config.get("provider", "") or "").lower()
     transport = _provider_video_transport(provider)
 
+    if transport == VIDEO_TRANSPORT_DOUBAO:
+        return "doubao"
     if transport in KIMI_VIDEO_TRANSPORTS:
         return "kimi"
     if transport == VIDEO_TRANSPORT_QWEN:
@@ -357,12 +362,16 @@ def _detect_video_strategy(
 
     if any(token in api_base for token in ("moonshot", "kimi")) or "kimi" in model:
         return "kimi"
+    if "ark" in api_base or "volces" in api_base:
+        return "doubao"
     if "dashscope" in api_base or "qwen" in model or "qvq" in model:
         return "qwen"
     if "xiaomimimo" in api_base or "api.mimo" in api_base:
         return "mimo"
     if "openrouter.ai" in api_base:
         return "openrouter"
+    if "doubao" in model or "volc" in model:
+        return "doubao"
     if "mimo" in model or "xiaomi" in model:
         return "mimo"
 
@@ -2502,6 +2511,8 @@ class Main(Star):
             part["media_resolution"] = _normalize_mimo_media_resolution(
                 self.config.get("mimo_media_resolution", "default")
             )
+        elif strategy == "doubao":
+            part["fps"] = float(self.config.get("doubao_fps", 2.0))
         elif strategy in {"openrouter", "generic"}:
             part["fps"] = float(self.config.get("generic_fps", 2.0))
         return part

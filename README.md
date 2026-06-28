@@ -1,6 +1,6 @@
 ﻿# 引用视频理解
 
-> 注意：目前本插件的视频转述模型里，已适配 Qwen/DashScope 官方 `video_url + fps`、Moonshot/Kimi 官方 API、小米 MiMo 官方 API，以及通用 OpenAI-compatible `video_url` 链路；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析。
+> 注意：目前本插件的视频转述模型里，已适配 Qwen/DashScope 官方 `video_url + fps`、Moonshot/Kimi 官方 API、小米 MiMo 官方 API、火山引擎豆包（Volcengine Doubao）API，以及通用 OpenAI-compatible `video_url` 链路；Kimi Code（`api.kimi.com/coding/v1`）当前只能稳定走抽帧转述，不再尝试原生 `video_url` 视频解析。
 > 作者主页：https://github.com/Sisyphbaous-DT-Project
 
 他第一次给我看那些代码时，窗外的梧桐正往下掉叶子，十月末的风从纱窗缝里钻进来，在桌面上摊开的笔记本纸页间游走。他坐在宿舍那张吱嘎作响的椅子上，背微微弓着，手指在键盘上敲几下，又停下来，像是在斟酌什么。
@@ -294,7 +294,7 @@ README.md
 - `video_caption_provider_id`：单独指定视频转述模型。留空时会优先用当前聊天模型做转述。
 - `video_caption_use_current_provider`：未指定转述模型时，是否先用当前聊天模型尝试转述。
 - `video_caption_direct_enabled`：启用插件内独立视频转述通道。
-- `video_caption_direct_transport`：独立转述通道的视频传输方式。`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
+- `video_caption_direct_transport`：独立转述通道的视频传输方式。`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 会优先尝试原生视频；`kimicode` 当前会直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`doubao` 按火山引擎豆包 `video_url` 格式处理；`generic` 按普通 OpenAI-compatible 多模态处理，`auto` 自动判断。
 - `video_caption_direct_base_url` / `video_caption_direct_api_key` / `video_caption_direct_model`：独立转述通道自己的接口地址、密钥和模型，不影响 AstrBot 主聊天模型。选择 `kimicode` 时，插件会按 Kimi Code 官方约定自动使用 `kimi-for-coding`，模型输入框可留空或忽略。
 - `video_caption_direct_test_entry`：设置页里显式显示测试命令入口。当前 AstrBot WebUI 还不支持插件在这里直接挂一个自定义动作按钮，所以这里会直接提示使用 `/video_ref_test`。
 - `video_caption_prompt`：发给视频转述模型的提示词。
@@ -346,6 +346,24 @@ README.md
 - `mimo_media_resolution`：传给 MiMo 的 `media_resolution`，可选 `default` 或 `max`。
 - MiMo 官方接口支持公网视频 URL 和 base64 data URL；插件里的本地视频会按 `max_base64_mb` 转成 data URL，超限则跳过或走抽帧兜底。
 
+### 火山引擎豆包（Doubao）相关
+
+- 官方 Base URL 为 `https://ark.cn-beijing.volces.com/api/v3`。
+- 使用火山引擎方舟平台的模型，如 `doubao-seed-2-1-pro-260628` 等。
+- 豆包 API 使用标准的 OpenAI-compatible 接口格式，支持 `video_url` + `fps` 参数。
+- 插件会自动从 API Base URL（包含 `ark` 或 `volces`）和模型名（包含 `doubao`）识别豆包，无需手动配置 `video_transport`。
+- 也可显式设置 `video_caption_direct_transport=doubao` 强制使用豆包传输方式。
+- 豆包模式下使用 `doubao_fps` 控制视频抽帧频率，默认 `2.0`。
+- 使用前需要安装依赖：`pip install 'volcengine-python-sdk[ark]'`（可选，仅当使用官方 SDK 时；OpenAI-compatible 通道无需额外安装）。
+- 配置示例（独立转述通道）：
+  ```text
+  video_caption_direct_enabled: true
+  video_caption_direct_transport: doubao
+  video_caption_direct_base_url: https://ark.cn-beijing.volces.com/api/v3
+  video_caption_direct_api_key: <你的 API Key>
+  video_caption_direct_model: doubao-seed-2-1-pro-260628
+  ```
+
 ### GIF
 
 - `enable_gif_input`：把被引用的 GIF 按完整动图处理，而不是只看第一帧。
@@ -364,6 +382,7 @@ README.md
 - Qwen / DashScope 的 `video_url + fps` 注入和显式独立转述 transport。
 - 小米 MiMo 官方 `video_url + fps + media_resolution` 注入。
 - OpenRouter / 通用 OpenAI-compatible 的 `video_url` 注入。
+- 火山引擎豆包（Volcengine Doubao）`video_url` 注入与自动检测。
 - Kimi 上传模式入口。
 
 ## 目前仍不做的事

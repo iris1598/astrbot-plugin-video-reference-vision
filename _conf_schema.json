@@ -84,6 +84,12 @@
       "max"
     ]
   },
+  "doubao_fps": {
+    "type": "float",
+    "description": "豆包/火山引擎 ARK 抽帧频率",
+    "hint": "传给豆包/火山引擎 ARK 视频接口的抽帧频率。数值越高读取越细，但请求也会更重。",
+    "default": 2.0
+  },
   "kimi_strategy": {
     "type": "string",
     "description": "Kimi 处理策略",
@@ -170,7 +176,7 @@
   "video_caption_direct_transport": {
     "type": "string",
     "description": "独立转述视频传输方式",
-    "hint": "`auto` 自动判断；`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 当前不会再尝试原生 `video_url`，而是直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`generic` 则按通用 OpenAI-compatible 方式处理。",
+    "hint": "`auto` 自动判断；`qwen` 按 Qwen/DashScope 官方 `video_url + fps` 字段处理；`moonshot` 按 Moonshot/Kimi 官方方式处理视频；`kimicode` 当前不会再尝试原生 `video_url`，而是直接走抽帧转述；`mimo` 按小米 MiMo 官方视频字段处理；`doubao` 按火山引擎豆包 `video_url` 格式处理；`generic` 则按通用 OpenAI-compatible 方式处理。",
     "default": "auto",
     "options": [
       "auto",
@@ -178,6 +184,7 @@
       "moonshot",
       "kimicode",
       "mimo",
+      "doubao",
       "generic"
     ]
   },
